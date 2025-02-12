@@ -1,0 +1,17 @@
+Package: lmtpi
+Title: Longitudinal Modified Treatment Policies with Interference
+Version: 0.0.0.1000
+Authors@R: 
+    person("Christian", "Testa", , "ctesta@hsph.harvard.edu", role = c("aut", "cre"),
+           comment = c(ORCID = "YOUR-ORCID-ID"))
+Description: Estimation and inference for modified treatment policies in longitudinal settings with interference.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.2.3
+Imports: 
+    R6,
+    dplyr,
+    magrittr,
+    tidyr,
+    nnls

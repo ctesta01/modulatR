@@ -81,9 +81,10 @@ super_learner <- function(
   # split into an n_folds length list of training_data and validation_data:
   # training_data contains n_folds-1 folds of data, validation_data contains 1 fold
   training_data <- lapply(
-    1:n_folds, function(i) {data |> dplyr::filter(fold != i)})
+    1:n_folds, function(i) {data |> dplyr::filter(sl_fold != i) |> dplyr::select(-sl_fold)})
   validation_data <- lapply(
-    1:n_folds, function(i) {data |> dplyr::filter(fold == i)})
+    1:n_folds, function(i) {data |> dplyr::filter(sl_fold == i) |> dplyr::select(-sl_fold)})
+  data$sl_fold <- NULL # remove sl_fold column now
 
   # make a tibble/dataframe to hold the trained learners:
   # one for each combination of a specific fold and a specific model
@@ -98,7 +99,7 @@ super_learner <- function(
   # learner regression_formula[[i]].
   #
   if (inherits(regression_formulas, 'formula')) {
-    regression_formula <- rep(c(regression_formulas), length(learners)) # repeat the regression formula
+    regression_formulas <- rep(c(regression_formulas), length(learners)) # repeat the regression formula
   } else if (! (is.vector(regression_formulas) &&
                 length(regression_formulas) == length(learners) &&
                 all(sapply(regression_formulas, class) == 'formula'))) {
@@ -109,13 +110,22 @@ of formulas of the same length as the number of learners specified.")
   # for each i in 1:n_folds and each model, train the model
   trained_learners$learned_predictor <- lapply(
     1:nrow(trained_learners), function(i) {
-      learners[[trained_learners[[i,'learner_name']]]](
-        data = training_data[[trained_learners[[i,'split']]]],
-        regression_formula = regression_formulas[[
-          # calculate which learner has the name for this row and use
-          # the appropriate regression formula
-          which(names(learners) == trained_learners$learner_name[[i]])[[1]]
-        ]]
+      # calculate which learner has the name for this row and use
+      # the appropriate regression formula as well as the right
+      # extra_learner_args
+      learner_index <- which(names(learners) == trained_learners$learner_name[[i]])[[1]]
+
+      # train the learner — the returned output is the prediction function from
+      # the trained learner
+      do.call(
+        what = learners[[trained_learners[[i,'learner_name']]]],
+        args = c(list(
+          data = training_data[[trained_learners[[i,'split']]]],
+          regression_formula = regression_formulas[[
+            learner_index
+          ]]),
+          extra_learner_args[[learner_index]]
+        )
       )
     }
   )
@@ -208,7 +218,14 @@ the learners.")
   # fit all of the learners on the entire dataset
   fit_learners <- lapply(
     1:length(learners), function(i) {
-      learners[[i]](data = data, regression_formula = regression_formulas[[i]])
+      do.call(
+        what = learners[[i]],
+        args = c(list(
+          data = data, regression_formula = regression_formulas[[i]]
+          ),
+          extra_learner_args[[i]]
+        )
+      )
     })
 
   # construct a function that predicts using all of the learners combined using
@@ -249,20 +266,20 @@ determine_superlearner_weights_nnls <- function(data, y_variable) {
   index_of_yvar <- which(colnames(data) == y_variable)[[1]]
   nnls_output <- nnls::nnls(
     A = as.matrix(data[,-index_of_yvar]),
-    b = data[[yvar]])
+    b = data[[y_variable]])
 
   return(nnls_output$x)
 }
 
 #' Add a new column called folds to the data passed
 #'
-#' A helper function for inserting a column called `fold` into the
+#' A helper function for inserting a column called `sl_fold` into the
 #' data with integers randomly sampled with replacement from `1:n_folds`.
 #'
 make_folds <- function(data, n_folds = 5) {
-  if ('fold' %in% colnames(data)) {
-    stop("The data passed to make_folds already has a folds column")
+  if ('sl_fold' %in% colnames(data)) {
+    stop("The data passed to make_folds already has a sl_fold column")
   }
-  data$fold <- sample.int(n = n_folds, size = nrow(data), replace = TRUE)
+  data$sl_fold <- sample.int(n = n_folds, size = nrow(data), replace = TRUE)
   return(data)
 }

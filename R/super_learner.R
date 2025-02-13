@@ -1,25 +1,44 @@
 #' Super Learner: Cross-Validation Based Ensemble Learning
 #'
 #' @examples
+#' \dontrun{
+#' library(lme4)
+#' library(randomForest)
+#'
 #' learners <- list(
-#'      glm = function(data, regression_formula = regression_formula) { model <- lm(formula = regression_formula, data = data); return(function(Xnew) { predict(model, newdata = Xnew) }) },
-#'      rf = function(data, regression_formula) { model <- randomForest::randomForest(formula = regression_formula, data = data); return(function(Xnew) { predict(model, newdata = Xnew) }) },
-#'      glmnet = function(data, regression_formula = regression_formula) {
+#'      glm = function(data, regression_formula, ...) {
+#'        model <- lm(formula = regression_formula, data = data)
+#'        return(function(newdata) { predict(model, newdata = newdata) })
+#'        },
+#'      rf = function(data, regression_formula, ...) {
+#'        model <- randomForest::randomForest(formula = regression_formula, data = data)
+#'        return(function(newdata) { predict(model, newdata = newdata) })
+#'        },
+#'      glmnet = function(data, regression_formula, ...) {
 #'        xvars <- attr(terms(regression_formula), "term.labels")
 #'        yvar <- as.character(regression_formula)[2]
 #'        model <- glmnet::glmnet(y = data[[yvar]], x = as.matrix(data[,xvars]), lambda = .2)
-#'        return(function(Xnew) { as.vector(predict(model, newx = as.matrix(Xnew[,xvars]), type = 'response')) })
-#'        }
+#'        return(function(newdata) { as.vector(predict(model, newx = as.matrix(newdata[,xvars]), type = 'response')) })
+#'        },
+#'      lme4 = function(data, regression_formula, ...) {
+#'        model <- lme4::lmer(formula = regression_formula, data = data)
+#'        return(function(newdata) { predict(model, newdata = newdata) })
+#'      }
 #'   )
 #'
 #' # mtcars example ---
-#' sl_model <- lmtp::super_learner(
+#' regression_formulas <- c(
+#'   rep(c(mpg ~ cyl + hp), 3), # first three models use same formula
+#'   mpg ~ (1 | cyl) + hp # lme4 uses different language features
+#'   )
+#'
+#' sl_model <- super_learner(
 #'   data = mtcars,
-#'   regression_formula = mpg ~ cyl + hp,
+#'   regression_formula = regression_formulas,
 #'   learners = learners)
 #'
 #' sl_model_predictions <- sl_model(mtcars)
-#' fit_individual_learners <- lapply(learners, function(learner) { learner(data = mtcars, regression_formula = mpg ~ cyl + hp) } )
+#' fit_individual_learners <- lapply(1:length(learners), function(i) { learners[[i]](data = mtcars, regression_formula = regression_formulas[[i]]) } )
 #' individual_learners_rmse <- lapply(fit_individual_learners, function(fit_learner) { rmse(fit_learner(mtcars) - mtcars$mpg) })
 #'
 #' print(paste0("super-learner rmse: ", rmse(sl_model_predictions - mtcars$mpg)))
@@ -29,26 +48,35 @@
 #' sl_model <- super_learner(
 #'   data = iris,
 #'   regression_formula = Sepal.Length ~ Sepal.Width + Petal.Length + Petal.Width,
-#'   learners = learners)
+#'   learners = learners[1:3])
 #'
 #' sl_model_predictions <- sl_model(iris)
-#' fit_individual_learners <- lapply(learners, function(learner) { learner(data = iris, regression_formula = Sepal.Length ~ Sepal.Width + Petal.Length + Petal.Width) } )
+#' fit_individual_learners <- lapply(learners[1:3], function(learner) { learner(data = iris, regression_formula = Sepal.Length ~ Sepal.Width + Petal.Length + Petal.Width) } )
 #' individual_learners_rmse <- lapply(fit_individual_learners, function(fit_learner) { rmse(fit_learner(iris) - iris$Sepal.Length) })
 #'
 #' print(paste0("super-learner rmse: ", rmse(sl_model_predictions - iris$Sepal.Length)))
 #' individual_learners_rmse
+#' }
 #'
 #' @export
 super_learner <- function(
   data,
   learners,
-  regression_formula,
+  regression_formulas,
+  y_variable,
   n_folds = 5,
   determine_superlearner_weights = determine_superlearner_weights_nnls,
-  continuous_or_discrete = 'continuous') {
+  continuous_or_discrete = 'continuous',
+  extra_learner_args = NULL,
+  verbose_output = FALSE) {
+
+  # throw an error if the learners are not a named list
+  if (! is.list(learners) | length(unique(names(learners))) != length(learners)) {
+    stop("The learners passed to lmpti::super_learner must have (unique) names.")
+  }
 
   # add a folds column
-  data %<>% make_folds(n_folds = n_folds)
+  data <- make_folds(data, n_folds = n_folds)
 
   # split into an n_folds length list of training_data and validation_data:
   # training_data contains n_folds-1 folds of data, validation_data contains 1 fold
@@ -63,12 +91,31 @@ super_learner <- function(
     split = rep(1:n_folds, length(learners)),
     learner_name = rep(names(learners), each = n_folds))
 
+  # handle vectorized regression_formulas argument
+  #
+  # if the regression_formulas is just a single formula, then we repeat it
+  # in a vector length(learners) times to make it simple to just pass the ith
+  # learner regression_formula[[i]].
+  #
+  if (inherits(regression_formulas, 'formula')) {
+    regression_formula <- rep(c(regression_formulas), length(learners)) # repeat the regression formula
+  } else if (! (is.vector(regression_formulas) &&
+                length(regression_formulas) == length(learners) &&
+                all(sapply(regression_formulas, class) == 'formula'))) {
+    stop("The regression_formula must either be a single formula or a vector
+of formulas of the same length as the number of learners specified.")
+  }
+
   # for each i in 1:n_folds and each model, train the model
   trained_learners$learned_predictor <- lapply(
     1:nrow(trained_learners), function(i) {
       learners[[trained_learners[[i,'learner_name']]]](
         data = training_data[[trained_learners[[i,'split']]]],
-        regression_formula = regression_formula
+        regression_formula = regression_formulas[[
+          # calculate which learner has the name for this row and use
+          # the appropriate regression formula
+          which(names(learners) == trained_learners$learner_name[[i]])[[1]]
+        ]]
       )
     }
   )
@@ -95,20 +142,34 @@ super_learner <- function(
   # This only supports simple Y variables, nothing like a survival right-hand-side or
   # a transformed right-hand-side.
   #
-  # TODO: Add an error if Y is not a simple outcome
-  formula_as_character <- as.character(regression_formula) # typically c("~", "yvar", "x_variables + ...")
-  y_variable <- formula_as_character[[2]]
+  y_variables <- sapply(regression_formulas, function(f) as.character(f)[[2]])
+  if (missing(y_variable) & length(unique(y_variables)) == 1) {
+    y_variable <- unique(y_variables)
+  } else if (missing(y_variable) & length(unique(y_variables)) > 1) {
+    stop("Cannot infer the y-variable from the formulas passed.
+Please pass yvar = ... to lmtp::super_learner.")
+  }
 
-  # insert the validation data in another column next to the predictions
-  # TODO: Change validation_data to Y
-  #
-  second_stage_SL_dataset$Y <- lapply(1:nrow(second_stage_SL_dataset), function(i) {
+  if (! y_variable %in% colnames(data)) {
+    stop("The left-hand-side of the regression formula given must appear as a column in the data passed.")
+  }
+
+  # if the y_variable matches with any of the learners, we have problems —
+  # the output second_stage_SL_dataset wouldn't be interpretable.
+  if (y_variable %in% names(learners)) {
+    stop("The outcome and names of all of the learners must be distinct, because the output
+from super_learner is a data.frame with columns including the outcome variable and each of
+the learners.")
+  }
+
+  # insert the validation Y data in another column next to the predictions
+  second_stage_SL_dataset[[y_variable]] <- lapply(1:nrow(second_stage_SL_dataset), function(i) {
     validation_data[[second_stage_SL_dataset[[i, 'split']]]][[y_variable]]
   })
 
   # unnest all of the data (each cell prior to this contained a vector of either
   # predictions or the validation data)
-  second_stage_SL_dataset <- tidyr::unnest(second_stage_SL_dataset, cols = everything())
+  second_stage_SL_dataset <- tidyr::unnest(second_stage_SL_dataset, cols = colnames(second_stage_SL_dataset))
 
   # drop the split column so we can simplify the following regression formula
   second_stage_SL_dataset$split <- NULL
@@ -128,7 +189,9 @@ super_learner <- function(
   # TODO: An option for handling count outcomes / weighting the
   # outcomes/observations -- What may be a solution is multiplying the
   # rows by the square root of the desired weights...
-  learner_weights <- determine_superlearner_weights(second_stage_SL_dataset)
+  learner_weights <- determine_superlearner_weights(second_stage_SL_dataset, y_variable)
+
+  # adjust weights according to if using continuous or discrete super-learner
   if (continuous_or_discrete == 'continuous') {
     # nothing needs to be done; leave the learner_weights as-is
   } else if (continuous_or_discrete == 'discrete') {
@@ -145,7 +208,7 @@ super_learner <- function(
   # fit all of the learners on the entire dataset
   fit_learners <- lapply(
     1:length(learners), function(i) {
-      learners[[i]](data = data, regression_formula = regression_formula)
+      learners[[i]](data = data, regression_formula = regression_formulas[[i]])
     })
 
   # construct a function that predicts using all of the learners combined using
@@ -160,7 +223,16 @@ super_learner <- function(
       Reduce(`+`, .) # aggregate across the weighted model predictions
   }
 
-  return(predict_from_super_learned_model)
+  if (verbose_output) {
+    return(
+      list(
+        sl_predictor = predict_from_super_learned_model,
+        holdout_predictions = second_stage_SL_dataset
+        )
+      )
+  } else {
+    return(predict_from_super_learned_model)
+  }
 }
 
 
@@ -172,11 +244,12 @@ super_learner <- function(
 #' least squares to determine the weights to use for a SuperLearner.
 #'
 #' @export
-determine_superlearner_weights_nnls <- function(data) {
+determine_superlearner_weights_nnls <- function(data, y_variable) {
   # use nonlinear least squares to produce a weighting scheme
+  index_of_yvar <- which(colnames(data) == y_variable)[[1]]
   nnls_output <- nnls::nnls(
-    A = as.matrix(dplyr::select(data, -Y)),
-    b = data$Y)
+    A = as.matrix(data[,-index_of_yvar]),
+    b = data[[yvar]])
 
   return(nnls_output$x)
 }

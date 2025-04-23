@@ -20,16 +20,17 @@
 #' An example of a policy where the regions must be
 #'
 #' @examples
-#'
+#' \dontrun{
 #' # Imagine a policy that reduces the exposure by 5 for everyone:
 #'
 #' mtp <- MTP$new(
 #'   smooth_invertible_regions = function(A, L) { return(TRUE) },
 #'   policy = function(A, L) { A - 5 },
 #'   inverse_policy = function(A, L) { A + 5 },
-#'   derivative_of_policy = function(A, L) { 1 },
+#'   derivative_of_policy = function(A, L) { 1 }
 #' )
-#' mtp$policy(5)
+#' mtp$policy[[1]](5)
+#' mtp$which_region(A = data.frame(1), L = data.frame(1))
 #'
 #' # An improvement grounded in reality might be to specify that the policy
 #' # is a reduction of surgery duration by 5-minutes only when
@@ -60,10 +61,11 @@
 #'   L = c(35, 25))
 #'
 #' mtp$which_region(example_df$A, example_df[,'L', drop=FALSE])
-#'
 #' mtp$apply_policy(example_df$A, example_df[,'L', drop=FALSE])
+#' }
 #'
-#' @exportClass MTP
+#' @export
+#'
 MTP <- R6::R6Class("MTP",
   public = list(
     smooth_invertible_regions = NULL,
@@ -154,13 +156,18 @@ MTP <- R6::R6Class("MTP",
     # TRUE/FALSE vector as long as the length of A.
     #
     # then determine the first region that applies to each A, L combination
-    lapply(
+    #
+    # the vapply below produces a matrix where each column corresponds to one of
+    # the regions, each row is one of the (A, L) observations passed in, and the
+    # entry is TRUE/FALSE depending on if the region applies to (A, L).
+    #
+    # then the apply(...) step gets the first applicable policy region
+    # across the columns of the prior data frame.
+    vapply(
       self$smooth_invertible_regions, function(f) {
         f(A, L)
-      }) |>
-      as.data.frame() |>
-      t() |>
-      apply(MARGIN = 2, first_true_index)
+      }, FUN.VALUE = matrix(nrow = length(A), ncol = length(self$smooth_invertible_regions))) |>
+      apply(MARGIN = 1, first_true_index) # get the first policy that applies
   },
 
   apply_policy = function(A, L) {
@@ -180,6 +187,27 @@ MTP <- R6::R6Class("MTP",
         }
       }
       )
+
+    return(updated_A)
+  },
+
+  apply_inverse_policy = function(A, L) {
+
+    # determine which region applies to
+    which_region_applies <- self$which_region(A, L)
+
+    # TODO: handle that we're requiring L to be a data frame of covariates
+    # TODO: what happens if L is empty?
+    updated_A <- sapply(
+      1:length(which_region_applies),
+      function(i) {
+        if (is.na(which_region_applies[[i]])) {
+          return(NA)
+        } else {
+          return(self$inverse_policy[[which_region_applies[[i]]]](A[[i]], L[i, ]))
+        }
+      }
+    )
 
     return(updated_A)
   }

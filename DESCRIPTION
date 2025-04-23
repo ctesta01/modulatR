@@ -12,6 +12,13 @@ RoxygenNote: 7.2.3
 Imports: 
     R6,
     dplyr,
-    magrittr,
-    tidyr,
-    nnls
+    glmnet,
+    lme4,
+    mgcv,
+    nnls,
+    randomForest,
+    ranger,
+    tibble,
+    tidyr
+Suggests:
+Config/Needs/website: rmarkdown

@@ -5,6 +5,36 @@ What *should* the user interface to `lmtpi` look like?
   * There should be a clean interface for specifying modified treatment policies
   * Similarly, it should be clear how to specify the interference structure 
   * Supporting functions that visualize / report on the estimates should be provided 
+  
+
+```r
+# redraft as of Apr 23 2025
+# 
+# after reconsideration, I think modularizing the interface further would be 
+# an improvement. 
+
+# workflow: 
+# users should first specify the following: 
+
+lmtp_data_struct <- ... 
+
+config <- ... 
+
+policy <- ... 
+
+# and then users can run: 
+
+lmtp_task$new(
+  lmtp_data_struct,
+  network,
+  config,
+  exposure_map,
+  estimation_strategy = 'tmle'
+  )
+
+lmtp_task$run()
+```
+
 
 ```r
 library(lmtpi)

@@ -14,6 +14,7 @@ Imports:
     dplyr,
     glmnet,
     lme4,
+    magrittr,
     mgcv,
     nnls,
     randomForest,
@@ -21,4 +22,7 @@ Imports:
     tibble,
     tidyr
 Suggests:
+    knitr,
+    rmarkdown
 Config/Needs/website: rmarkdown
+VignetteBuilder: knitr

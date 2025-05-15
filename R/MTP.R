@@ -19,6 +19,8 @@
 #'
 #' An example of a policy where the regions must be
 #'
+#' @export
+
 #' @examples
 #' \dontrun{
 #' # Imagine a policy that reduces the exposure by 5 for everyone:
@@ -64,7 +66,6 @@
 #' mtp$apply_policy(example_df$A, example_df[,'L', drop=FALSE])
 #' }
 #'
-#' @export
 #'
 MTP <- R6::R6Class("MTP",
   public = list(
@@ -133,10 +134,9 @@ MTP <- R6::R6Class("MTP",
       self$derivative_of_policy <- derivative_of_policy
     },
 
-  # Calculate which region the input A and L belong to
-  which_region = function(A, L) {
-    if (length(A) != nrow(L)) {
-      stop("A and L have incompatible dimensions")
+  which_region_singleton = function(A, L) {
+    if (! length(A) == 1) {
+      stop("MTP$which_region_singleton() is meant for a single (A, L) pair at a time")
     }
 
     # extract the first true index
@@ -149,31 +149,39 @@ MTP <- R6::R6Class("MTP",
       }
     }
 
-    # for each of the test-functions that specify the smooth_invertible_regions,
-    # apply it to A and L provided.
-    #
-    # thus for each of the functions in smooth_invertible_regions, we get a
-    # TRUE/FALSE vector as long as the length of A.
-    #
-    # then determine the first region that applies to each A, L combination
-    #
-    # the vapply below produces a matrix where each column corresponds to one of
-    # the regions, each row is one of the (A, L) observations passed in, and the
-    # entry is TRUE/FALSE depending on if the region applies to (A, L).
-    #
-    # then the apply(...) step gets the first applicable policy region
-    # across the columns of the prior data frame.
-    vapply(
+    which_regions_apply <- sapply(
       self$smooth_invertible_regions, function(f) {
         f(A, L)
-      }, FUN.VALUE = matrix(nrow = length(A), ncol = length(self$smooth_invertible_regions))) |>
-      apply(MARGIN = 1, first_true_index) # get the first policy that applies
+      })
+
+    which_region_applies <- first_true_index(which_regions_apply)
+
+    return(which_region_applies)
+  },
+
+  which_region_vectorized = function(A, L) {
+    if (is.vector(L)) {
+      L <- data.frame(L = L)
+    }
+
+    if (length(A) != nrow(L)) {
+      stop("A and L have incompatible dimensions")
+    }
+
+    which_regions_apply <- sapply(1:length(A), function(i) {
+      self$which_region_singleton(A[i], L[i,])
+    })
+
+    return(which_regions_apply)
   },
 
   apply_policy = function(A, L) {
+    if (is.vector(L)) {
+      L <- data.frame(L)
+    }
 
     # determine which region applies to
-    which_region_applies <- self$which_region(A, L)
+    which_region_applies <- self$which_region_vectorized(A, L)
 
     # TODO: handle that we're requiring L to be a data frame of covariates
     # TODO: what happens if L is empty?
@@ -192,9 +200,12 @@ MTP <- R6::R6Class("MTP",
   },
 
   apply_inverse_policy = function(A, L) {
+    if (is.vector(L)) {
+      L <- data.frame(L)
+    }
 
     # determine which region applies to
-    which_region_applies <- self$which_region(A, L)
+    which_region_applies <- self$which_region_vectorized(A, L)
 
     # TODO: handle that we're requiring L to be a data frame of covariates
     # TODO: what happens if L is empty?

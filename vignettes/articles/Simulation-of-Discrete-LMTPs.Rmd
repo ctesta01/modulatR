@@ -1,0 +1,235 @@
+---
+title: "Simulation of LMTPs"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(lmtpi)
+library(tidyverse)
+library(magrittr)
+```
+
+## Scenario: Simple Net-Benefit Effect, No Time-Varying Confounder/Exposure Feedback
+
+Let's imagine as simple a scenario we can: 
+
+  * There is a drug we are studying for its effect on some disease state 
+  * People's adherence to the drug daily is $\mathrm{Bernoulli}(\lambda)$ on each day
+  and each time-step represents a week, so we 
+  * There are time-varying covariates $L_{i,t}$ representing disease state, but 
+  that's it.  We will assume if they take their drug, that reduces their disease state. 
+  Everyone in the study starts out with a fairly high disease state. 
+  * We will introduce the policy up-front so that we can model both factual 
+  and counterfactual outcomes in the data generating process.
+  
+### Modified Treatment Policy Definition 
+
+Imagine that we could get everyone to improve their adherence to the prescribed 
+regimen by *2 days (if feasible)* by some kind of encouragement design. 
+Obviously that wouldn't encourage people to take the drug more than 
+they're supposed to (once every day of the week).
+
+We'd like to know how much of an impact this might have on their outcomes. 
+
+```{r}
+policy <- MTP$new(
+  smooth_invertible_regions = list(
+    function(A, L) { A %btn[]% c(0, 5) },
+    function(A, L) { A == 6 },
+    function(A, L) { A == 7 }),
+  policy = list(
+    \(A, L) { A + 2 },
+    \(A, L) { A + 1 },
+    \(A, L) { A }
+  ),
+  inverse_policy = list(
+    \(A, L) { A - 2 },
+    \(A, L) { A - 1 },
+    \(A, L) { A }
+  ),
+  derivative_of_policy = list(
+    \(A, L) 1,
+    \(A, L) 1,
+    \(A, L) 1
+  )
+)
+```
+
+### Data Generating Process
+
+```{r}
+# hyperparameters for study 
+lambda <- 0.7
+n_timesteps <- 4L
+n_individuals <- 40L
+
+# generate some data
+dgp_simple_scenario <- function(n, t) {
+  df <- list()
+  
+  stopifnot(is.integer(t))
+  
+  for (i in 1:(t+1)) {
+    if (i == 1) {
+      newdata <- 
+        tibble::tibble(
+          id = 1:n,
+          t = 1,
+          L = rnorm(n = n, mean = 40, sd = 5),
+          A = rbinom(n = n, size = 7, prob = lambda)
+        )
+    } else if (i > 1 && i < t+1) {
+      prior_timestep <- 
+        df |> dplyr::filter(t == i - 1)
+      
+      newdata <- 
+        prior_timestep |> 
+        dplyr::mutate(
+          t = i,
+          L = L + rnorm(n = 40, mean = 1, sd = 1)*ifelse(A>3, 1, 0) - 
+             rnorm(n = 40, mean = 4, sd = 1)*ifelse(A <= 3, 1, 0),
+          A = rbinom(n = n, size = 7, prob = (0:7)/7)
+        )
+    } else if (i == t+1) {
+      prior_timestep <- 
+        df |> dplyr::filter(t == i - 1)
+      
+      newdata <- 
+        prior_timestep |> 
+        dplyr::mutate(
+          t = i,
+          L = L + rnorm(n = 40, mean = 1, sd = 1)*ifelse(A>3, 1, 0) - 
+             rnorm(n = 40, mean = 4, sd = 1)*ifelse(A <= 3, 1, 0),
+          A = NA
+        )
+    }
+    df <- dplyr::bind_rows(df, newdata)
+  }
+  return(df)
+}
+
+df <- dgp_simple_scenario(n = n_individuals, t = n_timesteps)
+
+ggplot(df, aes(x = t, y = L, group = id, color = A)) + 
+  geom_point() + 
+  geom_line(alpha = 0.5, size = 1) + 
+  colorspace::scale_color_continuous_sequential(palette = "Plasma", 
+                                                rev = FALSE, end = .85) + 
+  theme_bw() + 
+  labs(
+    x = "Time",
+    y = "Disease State",
+    color = "Doses Taken",
+    shape = "Doses Taken",
+    title = "Patient History in Simulation Study",
+    subtitle = paste0("n = ", n_individuals, ", ", n_timesteps, " time-steps")) + 
+  theme(legend.position = 'bottom',
+        panel.grid = element_blank()) 
+```
+
+
+
+```{r}
+# reshaping to a wide format for lmtpi 
+
+df_wide <- df |> 
+  tidyr::pivot_wider(
+    id_cols = 'id',
+    names_from = 't',
+    values_from = c('L', 'A'))
+
+# name outcome properly and 
+# drop extraneous treatment variable for A_5 (NAs from pivoting)
+df_wide %<>% rename(Y = L_5)
+df_wide %<>% select(-A_5)
+
+lmtp_data <- LMTP_Data_Struct$new(
+  data = df_wide,
+  id_col = 'id',
+  n_timesteps = n_timesteps,
+  exposure_cols = paste0('A_', 1:4),
+  time_varying_covariate_cols = lapply(1:n_timesteps, \(t) { paste0('L_', t) }),
+  outcome_col = 'Y'
+)
+```
+
+## outcome regression 
+
+To quote the text of the Díaz et al 2023 paper: 
+
+> In particular, $m_t : t = 1, ..., \tau$ may be estimated as follows. Start by
+running a preferred regression algorithm of $m_{\tau+1, i} = Y_i$ on
+$(A_{\tau,i}, H_{\tau, i})$. Then evaluate the estimator $\hat m_{\tau}$ at
+$(A_{\tau, i}^{\mathbb{d}}, H_{\tau, i})$, that is, compute the prediction $\hat
+m_{\tau}(A_{\tau, i}^{\mathbb d}, H_{\tau, i})$. Use this prediction as the
+pseudo-outcome in a regression on $(A_{\tau-1,i}, H_{\tau, i})$ to obtain an
+estimate of $\hat m_{\tau-1}$. Compute the pseudo-outcome $\hat
+m_{\tau-1}(A_{\tau-1,i}, H_{\tau, i})$ and iterate the process until obtaining
+an estimate for $\hat m_1$.
+
+```{r}
+for (timestep_t in (n_timesteps):1) {
+  
+  # get history up to time t 
+  Ht = lmtp_data$H(timestep_t)
+  Y_col <- lmtp_data$outcome_col
+  
+  if (timestep_t == n_timesteps) {
+    
+    training_dataset <- 
+      dplyr::bind_cols(
+           Y = lmtp_data$Y,
+           A = lmtp_data$A(timestep_t),
+           Ht)
+    
+    A_col = lmtp_data$exposure_cols[timestep_t]
+    colnames(training_dataset)[1] <- Y_col
+    colnames(training_dataset)[2] <- A_col
+    
+    model_t <- 
+      lm(formula = paste0(Y_col, " ~ ."), data = training_dataset)
+    
+    mtp_shifted_A_t <- policy$apply_policy(A = lmtp_data$A(timestep_t), L = lmtp_data$L(timestep_t)) # doesn't depend on L
+    
+    prediction_dataset_under_policy_shift <- dplyr::bind_cols(mtp_shifted_A_t, Ht)
+    colnames(prediction_dataset_under_policy_shift)[1] <- A_col
+    pseudo_outcome <- predict(model_t, newdata = prediction_dataset_under_policy_shift)
+  } else if (timestep_t >= 1) {
+    
+      training_dataset <- 
+      dplyr::bind_cols(
+           Y = pseudo_outcome,
+           A = lmtp_data$A(timestep_t),
+           Ht)
+    
+      A_col = lmtp_data$exposure_cols[timestep_t]
+      colnames(training_dataset)[1] <- Y_col
+      colnames(training_dataset)[2] <- A_col
+      
+      model_t <- 
+        lm(formula = paste0(Y_col, " ~ ."), data = training_dataset)
+    
+      mtp_shifted_A_t <- policy$apply_policy(A = lmtp_data$A(timestep_t), L = lmtp_data$L(timestep_t)) # doesn't depend on L
+      
+      prediction_dataset_under_policy_shift <- dplyr::bind_cols(mtp_shifted_A_t, Ht)
+      colnames(prediction_dataset_under_policy_shift)[1] <- A_col
+      pseudo_outcome <- predict(model_t, newdata = prediction_dataset_under_policy_shift)
+  }
+}
+```
+
+## ipw estimate
+
+## doubly robust estimation
+
+```{r}
+lmtp_double_robust_estimator <- function(data, mtp, time, ...) {
+  # fitting treatment models 
+}
+```

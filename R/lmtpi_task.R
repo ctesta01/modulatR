@@ -5,39 +5,28 @@
 #' policy effect.
 #'
 #' @importFrom R6 R6Class
-lmtpiTask <- R6::R6Class("lmtpiTask",
+LMTPI_Task <- R6::R6Class("lmtpiTask",
   public = list(
-    data = NULL,
-    mtp = NULL,
-    outcome_var = NULL,
-    exposure_var = NULL,
-    time_var = NULL,
-    confounders = NULL,
-    estimation_config = list(),
 
-    # initialize method for lmtpTask$new()
+    # initialize method for LMTPI_Task$new()
     initialize = function(
       data = NULL,
-      mtp = NULL,
-      outcome_var = NULL,
-      exposure_var = NULL,
-      time_var = NULL,
-      confounders = NULL,
-      estimation_config = list()
+      policy = NULL,
+      config = list(),
+      network = NULL,
+      exposure_map = NULL
     ) {
       self$data <- data
-      self$mtp <- mtp
-      self$outcome_var <- outcome_var
-      self$exposure_var <- exposure_var
-      self$time_var <- time_var
-      self$confounders <- confounders
-      self$estimation_config <- estimation_config
+      self$policy <- policy
+      self$config <- config
+      self$network <- network
+      self$exposure_map <- exposure_map
     },
 
     fit = function() {
       # ...
-      outcome_regression_model <- fit_outcome_regression_model()
-      treatment_model <- fit_treatment_model()
+      # outcome_regression_model <- fit_outcome_regression_model()
+      # treatment_model <- fit_treatment_model()
     }
   )
 )

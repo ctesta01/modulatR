@@ -1,11 +1,21 @@
-# `lmtpi` — Longitudinal Modified Treatment Policies with Interference
+# `modulatR` — Longitudinal Modified Treatment Policies Modulated by Subgroup Effects
 
-What *should* the user interface to `lmtpi` look like? 
+`{modulatR}` aims to provide
   
-  * There should be a clean interface for specifying modified treatment policies
-  * Similarly, it should be clear how to specify the interference structure 
-  * Supporting functions that visualize / report on the estimates should be provided 
-  
+  * a clean interface for specifying (longitudinal) modified treatment policies
+  * with support for heterogeneous treatment effect estimation for (categorical/discrete) subgroups
+  * and supporting functions that visualize / report on the estimates
+
+
+## installation 
+
+`{modulatR}` can be installed via GitHub using 
+
+```r
+devtools::install_github("ctesta01/modulatR")
+```
+
+## simple demos
 
 ```r
 # redraft as of Apr 23 2025
@@ -37,7 +47,7 @@ lmtp_task$run()
 
 
 ```r
-library(lmtpi)
+library(modulatR)
 
 # specify a modified treatment policy
 mtp <- MTP$new(
@@ -117,3 +127,7 @@ task$fit()
   - Build out support for piecewise smooth invertible policies
   - Build out support for estimation with interference 
   - Build support for outcome types: continuous, binary, count 
+  
+# References and Similar Works
+
+  - 

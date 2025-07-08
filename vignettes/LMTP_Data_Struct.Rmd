@@ -15,7 +15,7 @@ knitr::opts_chunk$set(
 ```
 
 ```{r setup}
-library(lmtpi)
+library(modulatR)
 
 n_units <- 100    # number of study units
 n_timepoints <- 4 # number of time points

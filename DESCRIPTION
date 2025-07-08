@@ -1,10 +1,10 @@
-Package: lmtpi
-Title: Longitudinal Modified Treatment Policies with Interference
+Package: modulatR
+Title:  Longitudinal Modified Treatment Policies Modulated by Subgroup Effects
 Version: 0.0.0.1000
 Authors@R: 
     person("Christian", "Testa", , "ctesta@hsph.harvard.edu", role = c("aut", "cre"),
            comment = c(ORCID = "YOUR-ORCID-ID"))
-Description: Estimation and inference for modified treatment policies in longitudinal settings with interference.
+Description: Estimation and inference for modified treatment policies in longitudinal settings with heterogeneous effects according to subgroup membership.
 License: MIT + file LICENSE
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)

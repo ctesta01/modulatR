@@ -10,7 +10,7 @@ knitr::opts_chunk$set(
 ```
 
 ```{r setup}
-# library(lmtpi)
+# library(modulatR)
 devtools::load_all(".")
 library(nadir)
 library(Simulacron3)
@@ -484,7 +484,7 @@ set.seed(1234)
 # keep getting an empty model matrix... why? 
 # 
 results <- list()
-for (sample_size in c(30, 100, 300)) {
+for (sample_size in c(30, 100, 300, 1000)) {
   sim$set_config(list(sample_size = sample_size, replications = 10))
   sim$run()
   results[[length(results)+1]] <- dplyr::bind_cols(sample_size = sample_size, sim$get_results())

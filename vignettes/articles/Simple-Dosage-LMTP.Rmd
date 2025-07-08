@@ -1,5 +1,7 @@
 ---
 title: "Simulation of Simple Dosage LMTP"
+fontsize: 9pt
+format: pdf
 ---
 
 ```{r, include = FALSE}
@@ -10,7 +12,8 @@ knitr::opts_chunk$set(
 ```
 
 ```{r setup}
-library(lmtpi)
+# library(modulatR)
+devtools::load_all(".")
 library(tidyverse)
 library(magrittr)
 library(patchwork)
@@ -20,12 +23,14 @@ Outline:
   
   * The purpose of this document is to provide some simple demonstration examples for 
   this package. 
-  * We will consider two very simple scenarios in which taking more of the hypothetical
-  drug has a positive effect. 
+  <!-- * We will consider two very simple scenarios in which taking more of the hypothetical
+  drug has a positive effect. --> 
+  * We will consider a very simple scenario in which taking more of the hypothetical
+  drug has a positive effect.
   * In the first example, we will consider an additive shift effect. 
-  * In the second example, we will consider a multiplicative shift. 
+  <!-- * In the second example, we will consider a multiplicative shift. -->
 
-## Scenario 1: Simple Net-Benefit Effect, No Time-Varying Confounder/Exposure Feedback
+## Simple Net-Benefit Effect, No Time-Varying Confounder/Exposure Feedback
 
 Let's imagine as simple a scenario we can to test the implementation of this package.
 
@@ -47,22 +52,32 @@ Let's imagine as simple a scenario we can to test the implementation of this pac
 We'd like to know how much of an impact this might have on their outcomes. 
 
 ```{r}
+extra_dosage_shift <- 200
+
 policy <- MTP$new(
-  smooth_invertible_regions = list(function(A, L) { TRUE }),
-  policy = list(\(A, L) { A + 200 }),
-  inverse_policy = list(\(A, L) { A - 200 }),
-  derivative_of_policy = list(\(A, L) {1})
+ smooth_invertible_regions = list(function(A, L) { TRUE }),
+ policy = list(\(A, L) { A + extra_dosage_shift }),
+ inverse_policy = list(\(A, L) { A - extra_dosage_shift }),
+ derivative_of_policy = list(\(A, L) {1})
 )
 ```
 
 ### Data Generating Process
 
 ```{r}
+#| fig-width: 8
+#| fig-height: 5
+#| out-width: "100%"
+#| fig-dpi: 300
 # hyperparameters for study 
-dosage_sd <- 75
-n_timesteps <- 4L
-n_individuals <- 40L
+dosage_sd <- 100
+n_timesteps <- 2L
+n_individuals <- 1000L
 avg_starting_disease_state <- 100
+starting_disease_state_noise <- 0
+avg_starting_dosage <- 1000
+update_L_noise <- 0
+update_A_noise <- 10
 
 # the amount of reduction in disease state per day given their last dose received
 dosage_effect <- function(A) {
@@ -77,12 +92,12 @@ dgp_simple_scenario <- function(n, t, policy) {
   for (i in 1:(t+1)) {
     if (i == 1) {
       
-      newA <- rnorm(n = n, mean = 1000, sd = dosage_sd)
+      newA <- rnorm(n = n, mean = avg_starting_dosage, sd = dosage_sd)
       newdata <- 
         tibble::tibble(
           id = 1:n,
           t = 1,
-          L = rnorm(n = n, mean = avg_starting_disease_state, sd = 5),
+          L = rnorm(n = n, mean = avg_starting_disease_state, starting_disease_state_noise),
           L_intervened = L,
           A = newA,
           A_intervened = policy$apply_policy(newA, L)
@@ -91,36 +106,92 @@ dgp_simple_scenario <- function(n, t, policy) {
       prior_timestep <- 
         df |> dplyr::filter(t == i - 1)
       
-      U_L <- rnorm(n = 40, mean = 0, sd = 1)
-      U_A <- rnorm(n = n, mean = 0, sd = dosage_sd/5)
+      U_L <- rnorm(n = n_individuals, mean = 0, sd = update_L_noise)
+      U_A <- rnorm(n = n, mean = 0, sd = update_A_noise)
       
       newdata <- 
         prior_timestep |> 
         dplyr::mutate(
           t = i,
-          L = L + U_L - dosage_effect(A),
-          L_intervened = L_intervened + U_L - dosage_effect(A_intervened),
-          A = A + U_A,
-          A_intervened = policy$apply_policy(A + U_A, L_intervened)
+          L = L + U_L - dosage_effect(prior_timestep$A),
+          L_intervened = prior_timestep$L_intervened + U_L - dosage_effect(prior_timestep$A_intervened),
+          A = prior_timestep$A + U_A) |> 
+        mutate(
+          A_intervened = policy$apply_policy(A_intervened, L_intervened)
         )
     } else if (i == t+1) {
       prior_timestep <- 
         df |> dplyr::filter(t == i - 1)
       
-      U_L <- rnorm(n = 40, mean = 0, sd = 1)
+      U_L <- rnorm(n = n_individuals, mean = 0, sd = update_L_noise)
       
       newdata <- 
         prior_timestep |> 
         dplyr::mutate(
           t = i,
-          L = L + U_L - dosage_effect(A),
-          L_intervened = L_intervened + U_L - dosage_effect(A_intervened),
+          L = L + U_L - dosage_effect(prior_timestep$A),
+          L_intervened = prior_timestep$L_intervened + U_L - dosage_effect(prior_timestep$A_intervened),
           A = NA,
           A_intervened = NA
         )
     }
+    
     df <- dplyr::bind_rows(df, newdata)
   }
+  
+  # the pseudo-outcome represents "what if the intervention had been carried out
+  # during timesteps {i, ..., t}
+  pseudo_outcomes <- list()
+  for (i in 1:t) {
+    
+    # initial conditions; 
+    # these are the conditions before the first update
+    initial_timestep <- df |> filter(t == i) 
+    unmodified_L <- initial_timestep |> pull(L)
+    unmodified_A <- initial_timestep |> pull(A)
+    
+    for (j in i:(t+1)) {
+      
+      # we're going to need to modify the treatment received
+      A_received_at_time_j <- df |> filter(t == j) |> pull(A)
+      
+      # if it's the first timestep, construct the pseudo_Lj as the [pseudocode]:
+      # unmodified_L + dosage_effect(modified_treatment_Aj)
+      if (j == i) {
+        pseudo_Lj <- unmodified_L#  - dosage_effect(pseudo_Aj)
+        pseudo_Aj <- policy$apply_policy(unmodified_A, unmodified_L)
+      } else {
+        # if it's a later step, take the prior_pseudo_Lj and update it with 
+        # the dosage effect from the last timestep (under intervention)
+        pseudo_Lj <- prior_pseudo_Lj - dosage_effect(prior_pseudo_Aj)
+        
+        # assign updated treatment according to policy
+        if (j < t+1) {
+          pseudo_Aj <- policy$apply_policy(A_received_at_time_j, pseudo_Lj)
+        } else {
+          pseudo_Aj <- NA # no treatment is assigned at time t+1
+        }
+      }
+      
+      # store pseudo_Lj and pseudo_Aj in prior_* in preparation for next timestep
+      prior_pseudo_Lj <- pseudo_Lj
+      prior_pseudo_Aj <- pseudo_Aj
+      
+      if (j == t+1) {
+        pseudo_outcome_vec <- pseudo_Lj
+      }
+      rm(pseudo_Lj) # just to make sure no mistakes are introduced
+      rm(pseudo_Aj)
+    }
+    pseudo_outcomes[[length(pseudo_outcomes) + 1]] <-
+      tibble::tibble(id = initial_timestep$id,
+        t = i,
+        pseudo_outcome = pseudo_outcome_vec)
+  }
+  pseudo_outcomes <- dplyr::bind_rows(pseudo_outcomes)
+  
+  df <- left_join(df, pseudo_outcomes, by = c('id' = 'id', 't' = 't'))
+  
   return(df)
 }
 
@@ -168,6 +239,15 @@ plt2 <- ggplot(df, aes(x = t, y = L_intervened, group = id, color = A_intervened
 { plt1 + plt2 } +
   plot_layout(guides = 'collect') & 
   theme(legend.position = 'bottom')
+
+ggplot(df, aes(x = t, y = pseudo_outcome, group = id)) + 
+  geom_point() + 
+  geom_line() + 
+  geom_point(
+    data = df |> filter(t == n_timesteps + 1),
+    mapping = aes(x = 0, y = L_intervened),
+    shape = 2) + 
+  theme_bw() 
 ```
 
 #### True SATE 
@@ -177,13 +257,14 @@ since we simulated both the realized and counterfactual outcomes.
 
 ```{r}
 df |> 
-  filter(t == 5) |> 
+  filter(t == n_timesteps + 1) |> 
   mutate(Y_diff = L - L_intervened) |> 
   pull(Y_diff) |>
   summary()
 
 # this should match given the definition of the dosage_effect
-((1200 - 900) / 1000 * 50 - (1000-900)/1000 * 50) * 4
+((avg_starting_dosage + extra_dosage_shift - 900) / 1000 * 50 - 
+    (avg_starting_dosage-900)/1000 * 50) * n_timesteps
 ```
 
 
@@ -197,14 +278,14 @@ df_wide <- df |>
 
 # name outcome properly and 
 # drop extraneous treatment variable for A_5 (NAs from pivoting)
-df_wide %<>% rename(Y = L_5)
-df_wide %<>% select(-A_5)
+df_wide %<>% rename(Y = paste0("L_", n_timesteps+1))
+df_wide %<>% select(-paste0("A_", n_timesteps+1))
 
 lmtp_data <- LMTP_Data_Struct$new(
   data = df_wide,
   id_col = 'id',
   n_timesteps = n_timesteps,
-  exposure_cols = paste0('A_', 1:4),
+  exposure_cols = paste0('A_', 1:n_timesteps),
   time_varying_covariate_cols = lapply(1:n_timesteps, \(t) { paste0('L_', t) }),
   outcome_col = 'Y'
 )
@@ -225,14 +306,21 @@ m_{\tau-1}(A_{\tau-1,i}, H_{\tau, i})$ and iterate the process until obtaining
 an estimate for $\hat m_1$.
 
 ```{r}
+# name of the y-variable; in this case just 'Y' we get the name of the
+# Y-variable so that we can build regressions that consistently use the name for
+# Y as the outcome, even for the pseudo-outcome regressions so that if the
+# user/programmer looks into the models fit, the meaning of the outcome variable
+# is clear.
+Y_col <- lmtp_data$outcome_col
+
 for (timestep_t in (n_timesteps):1) {
+  print(paste0('time: ', timestep_t))
   
   # get history up to time t 
   # Ht includes (L1, ..., Lt, A1, ..., A_{t-1})
   # We can think of Ht as the history up to (before, not including) At 
   Ht = lmtp_data$H(timestep_t)
-  # name of the y-variable; in this case just 'Y'
-  Y_col <- lmtp_data$outcome_col
+  Lt = lmtp_data$L(timestep_t)
   
   if (timestep_t == n_timesteps) { # for the first g-computation step
     
@@ -241,7 +329,8 @@ for (timestep_t in (n_timesteps):1) {
       dplyr::bind_cols(
            Y = lmtp_data$Y,
            A = lmtp_data$A(timestep_t),
-           Ht)
+           Lt)
+           # Ht)
     
     
   } else if (timestep_t < n_timesteps & timestep_t >= 1) { # for subsequent g-computation steps
@@ -250,7 +339,8 @@ for (timestep_t in (n_timesteps):1) {
     training_dataset <-
       dplyr::bind_cols(Y = pseudo_outcome,
                        A = lmtp_data$A(timestep_t),
-                       Ht)
+                       Lt)
+                       # Ht)
   }
   
   # make sure everything is named properly 
@@ -266,24 +356,35 @@ for (timestep_t in (n_timesteps):1) {
   mtp_shifted_A_t <- policy$apply_policy(A = lmtp_data$A(timestep_t), L = lmtp_data$L(timestep_t)) # doesn't depend on L
   
   # combine into a dataframe of predictor variables to predict on
-  prediction_dataset_under_policy_shift <- dplyr::bind_cols(mtp_shifted_A_t, Ht)
+  prediction_dataset_under_policy_shift <- dplyr::bind_cols(A_col = mtp_shifted_A_t, Lt) # Ht)
   
   # make sure the At variable is named properly 
   colnames(prediction_dataset_under_policy_shift)[1] <- A_col
   
   # predict under the intervention at time t
   pseudo_outcome <- predict(model_t, newdata = prediction_dataset_under_policy_shift)
+  # pseudo_outcome <- predict(model_t, newdata = training_dataset)
 }
 
+# estimated LMTP effect distribution
 summary({ df_wide |> pull(Y)} - pseudo_outcome)
+
+# estimated LMTP effect
+mean({ df_wide |> pull(Y)}) - mean(pseudo_outcome)
+
+# bias 
+summary(df |> filter(t == n_timesteps + 1) |> pull(L_intervened) - pseudo_outcome)
 ```
 
+<!-- 
 ## ipw estimate
 
 ## doubly robust estimation
 
 ```{r}
-lmtp_double_robust_estimator <- function(data, mtp, time, ...) {
-  # fitting treatment models 
-}
+# lmtp_double_robust_estimator <- function(data, mtp, time, ...) {
+#   # fitting treatment models 
+# }
 ```
+
+-->

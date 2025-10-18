@@ -1,13 +1,13 @@
 #' Modified Treatment Policy Class Constructor
 #'
-#' The core idea is that the MTP class should support the storing of the
-#' functions relevant to specifying a piecewise smooth invertible policy.
+#' The MTP class facilitates the storing of the data and functions that specify
+#' and make it possible to use a piecewise smooth invertible policy.
 #'
 #' In the estimation of a modified treatment policy (MTP), one needs
 #' several ingredients in order to use the transformation of variables
 #' implied by the policy including: the inverse policy, the segments
 #' of the domain on which the policy is smooth and invertible, and the
-#' derivative of the policy.
+#' derivative of the policy on each segment.
 #'
 #' In the initialization of an MTP, we distinguish between
 #' the simplest case (no piecewise definition necessary) and the
@@ -16,8 +16,6 @@
 #'
 #' The non-piecewise case may be defined using a simplified syntax
 #' that does not involve wrapping every argument inside a `list()`.
-#'
-#' An example of a policy where the regions must be
 #'
 #' @export
 
@@ -96,6 +94,8 @@ MTP <- R6::R6Class("MTP",
     #' We don't want users to accidentally only specify part of their policy
     #' and use the defaults without realizing they've used the defaults that
     #' may not match with their policy.
+    #' @param smooth_invertible_regions A list of functions that return true on
+    #'   the range of each smooth invertible component of the policy.
     initialize = function(
       smooth_invertible_regions,
       policy,

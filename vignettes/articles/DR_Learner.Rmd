@@ -1,5 +1,0 @@
----
-title: DR-Learner for LMTPs
-author: Christian Testa
----
-

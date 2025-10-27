@@ -6,6 +6,12 @@ MTP <- R6::R6Class("MTP",
     inverse_map_pieces     = NULL, # list of b_j(A_star, L) -> A     (inverse of d_j on that piece's image)
     inverse_deriv_pieces   = NULL, # list of db_j(A_star, L) -> d/dA_star b_j(A_star, L)
 
+    # --- Functions that can be overwritten
+
+    # --- For Memoization via the memoise package
+    .memo_cache = NULL,
+    .memo_enabled = FALSE,
+
     # ---- Constructor
     initialize = function(region_predicates,
                           policy_pieces,
@@ -23,24 +29,24 @@ MTP <- R6::R6Class("MTP",
         "region_predicates must be a non-empty list of functions" =
           !(is.list(region_predicates) &&
               length(region_predicates) > 0 &&
-              all(sapply(region_predicates, is.function))),
+              all(future.apply::future_sapply(region_predicates, is.function))),
         "policy_pieces must be a list of functions of the same length" =
           !(
             is.list(policy_pieces) &&
               length(policy_pieces) == length(region_predicates) &&
-              all(sapply(policy_pieces, is.function))
+              all(future.apply::future_sapply(policy_pieces, is.function))
           ),
         "inverse_map_pieces must be a list of functions of the same length" =
           !(
             is.list(inverse_map_pieces) &&
               length(inverse_map_pieces) == length(region_predicates) &&
-              all(sapply(inverse_map_pieces, is.function))
+              all(future.apply::future_sapply(inverse_map_pieces, is.function))
           ),
         "inverse_deriv_pieces must be a list of functions of the same length" =
           !(
             is.list(inverse_deriv_pieces) &&
               length(inverse_deriv_pieces) == length(region_predicates) &&
-              all(sapply(inverse_deriv_pieces, is.function))
+              all(future.apply::future_sapply(inverse_deriv_pieces, is.function))
           )
       )
       bad <- names(stops)[unlist(stops)]
@@ -63,7 +69,7 @@ MTP <- R6::R6Class("MTP",
     # ---- Which piece applies for a single (A, L) *by domain predicate on natural A*
     piece_index_for_natural = function(A, L) {
       if (length(A) != 1L) stop("Provide a single A for piece_index_for_natural().")
-      truth <- vapply(self$region_predicates, function(f) isTRUE(f(A, L)), logical(1))
+      truth <- future.apply::future_vapply(self$region_predicates, function(f) isTRUE(f(A, L)), logical(1))
       idx <- which(truth)
       if (length(idx) == 0L) return(NA_integer_)
       if (length(idx) > 1L) stop(paste0("More than one region predicate applies to (A: ", A, ", L: ", L, ")"))
@@ -75,7 +81,7 @@ MTP <- R6::R6Class("MTP",
       AL <- self$.coerce_AL(A, L)
       A <- AL$A
       L <- AL$L
-      vapply(seq_along(A), function(i) {
+      future.apply::future_vapply(seq_along(A), function(i) {
         self$piece_index_for_natural(A[i], L[i, , drop = FALSE]) },
         integer(1)
         )
@@ -85,7 +91,7 @@ MTP <- R6::R6Class("MTP",
     apply_policy = function(A, L) {
       AL <- self$.coerce_AL(A, L); A <- AL$A; L <- AL$L
       idx <- self$piece_index_for_natural_vec(A, L)
-      vapply(seq_along(A), function(i) {
+      future.apply::future_vapply(seq_along(A), function(i) {
         j <- idx[i]
         if (is.na(j)) return(NA_real_)
         self$policy_pieces[[j]](A[i], L[i, , drop = FALSE])
@@ -95,7 +101,7 @@ MTP <- R6::R6Class("MTP",
     # ---- Given (A_star, L), find the appropriate pieces
     # We try each piece: A_nat <- b_j(A_star,L); check predicate_j(A_nat,L) AND d_j(A_nat,L) == A_star (within tol)
     .piece_indices_from_image = function(A_star, L, tol = 1e-8) {
-      which(vapply(seq_along(self$inverse_map_pieces), function(j) {
+      which(future.apply::future_vapply(seq_along(self$inverse_map_pieces), function(j) {
         a_nat <- self$inverse_map_pieces[[j]](A_star, L)
         ok_reg <- isTRUE(self$region_predicates[[j]](a_nat, L))
         if (!ok_reg) return(FALSE)
@@ -107,20 +113,22 @@ MTP <- R6::R6Class("MTP",
     # ---- Vectorized inverse: b_j(A_star, L) -> A
     apply_inverse_policy = function(A_star, L, tol = 1e-8) {
       AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      lapply(seq_along(A_star), function(i) {
+      future.apply::future_lapply(seq_along(A_star), function(i) {
         js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
         if (length(js) == 0L) return(numeric(0))
-        vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+        future.apply::future_vapply(js, function(j)
+          self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
       })
     },
 
     # ---- Jacobian for change-of-variables: b'_j(A_star, L)
     inverse_derivative = function(A_star, L, tol = 1e-8) {
       AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      lapply(seq_along(A_star), function(i) {
+      future.apply::future_lapply(seq_along(A_star), function(i) {
         js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
         if (length(js) == 0L) return(numeric(0))
-        vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+        future.apply::future_vapply(js, function(j)
+          self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
       })
     },
 
@@ -128,14 +136,16 @@ MTP <- R6::R6Class("MTP",
     # density_fun takes (a_vec, L_row_df) -> numeric vector of densities
     gd_contributions = function(A_star, L, density_fun, tol = 1e-8) {
       AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      lapply(seq_along(A_star), function(i) {
+      future.apply::future_lapply(seq_along(A_star), function(i) {
         js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
         if (length(js) == 0L) return(
           data.frame(piece = integer(0), a_pre = numeric(0), jac = numeric(0),
                      dens = numeric(0), term = numeric(0))
         )
-        a_pre  <- vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
-        jac    <- vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+        a_pre  <- future.apply::future_vapply(js, function(j)
+          self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+        jac    <- future.apply::future_vapply(js, function(j)
+          self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
         dens   <- density_fun(a_pre, L[i, , drop = FALSE])
         data.frame(piece = js, a_pre = a_pre, jac = jac, dens = dens,
                    term = abs(jac) * dens, row.names = NULL)
@@ -145,7 +155,7 @@ MTP <- R6::R6Class("MTP",
     # Sum over pieces to get g^d(A* | L) (vectorized over rows)
     gd_from_density = function(A_star, L, density_fun, tol = 1e-8) {
       contribs <- self$gd_contributions(A_star, L, density_fun, tol = tol)
-      vapply(contribs, function(df) if (nrow(df) == 0) 0 else sum(df$term), numeric(1))
+      future.apply::future_vapply(contribs, function(df) if (nrow(df) == 0) 0 else sum(df$term), numeric(1))
     },
 
     # ---- Diagnostics: check that d_j(b_j(a*,L),L) ~= a* on a grid of a* values you pass
@@ -154,8 +164,56 @@ MTP <- R6::R6Class("MTP",
       A_fwd   <- self$apply_policy(A_back, L)
       data.frame(A_star = A_star_grid, A_back = A_back, A_fwd = A_fwd,
                  ok = is.finite(A_back) & is.finite(A_fwd) & (abs(A_fwd - A_star_grid) <= tol))
+    },
+
+    # call after initialize(), or expose a flag in initialize if you want
+    enable_memoise = function(cache = cachem::cache_mem(max_size = 256 * 1024^2)) {
+      # cache_mem ~= in-RAM; or use cache_disk(dir=tempdir()) for big jobs
+      self$.memo_cache <- cache
+      self$.memo_enabled <- TRUE
+
+      # unlock bindings per advice here:
+      # https://github.com/r-lib/R6/issues/19
+      # because we want to modify these methods
+      unlockBinding("piece_index_for_natural_vec", self)
+      unlockBinding("apply_policy", self)
+      unlockBinding("apply_inverse_policy", self)
+      unlockBinding("inverse_derivative", self)
+      # unlockBinding("gd_contributions", self)
+      # unlockBinding("gd_from_density", self)
+
+      # Wrap the heaviest pure functions with memoise
+      # IMPORTANT: wrap vectorized interfaces so keys are short & calls are few
+      self$piece_index_for_natural_vec <-  memoise::memoise(self$piece_index_for_natural_vec,  cache = cache)
+      self$apply_policy                 <- memoise::memoise(self$apply_policy,                 cache = cache)
+      self$apply_inverse_policy         <- memoise::memoise(self$apply_inverse_policy,         cache = cache)
+      self$inverse_derivative           <- memoise::memoise(self$inverse_derivative,           cache = cache)
+      # self$gd_contributions             <- memoise::memoise(self$gd_contributions,             cache = cache)
+      # self$gd_from_density              <- memoise::memoise(self$gd_from_density,              cache = cache)
+
+      # re-lock the bindings for user safety:
+      lockBinding("piece_index_for_natural_vec", self)
+      lockBinding("apply_policy", self)
+      lockBinding("apply_inverse_policy", self)
+      lockBinding("inverse_derivative", self)
+      # lockBinding("gd_contributions", self)
+      # lockBinding("gd_from_density", self)
+
+      invisible(self)
+    },
+
+    disable_memoise = function() {
+      self$.memo_cache <- NULL
+      self$.memo_enabled <- FALSE
+      invisible(self)
+    },
+
+    reset_memo_cache = function() {
+      if (!is.null(self$.memo_cache)) self$.memo_cache$reset()
+      invisible(self)
     }
-  )
+  ),
+  lock_objects = FALSE
 )
 
 # Helpers to coerce scalar-or-function into function(L)->scalar

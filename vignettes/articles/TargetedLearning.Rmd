@@ -16,6 +16,7 @@ dat <- tibble::tibble(
 # Example MTP: additive shift by delta with bounds (helpers you provided)
 delta <- 0.5
 cont_mtp <- mtp_additive_shift(delta = delta, lower = -Inf, upper = Inf)
+cont_mtp$enable_memoise()
 
 spec <- MTPParameter$new(mtp = cont_mtp, A_type = "continuous",
                            nodes = list(W="W", A="A", Y="Y"))
@@ -31,8 +32,11 @@ nuis <- MTPNuisanceFactory$new(
 submod <- IdentityFluctuationMTP$new(mtp = cont_mtp)  # or LogisticFluctuationMTP with bounds for Y-range
 eng <- TMLEEngine$new(spec, nuis, submod)
 eng$set_fit_method(fit_tmle_for_MTP)
+a <- Sys.time()
 fit <- eng$fit(dat)
 fit$psi; fit$ci95
+b <- Sys.time()
+print(b-a)
 
 
 # fit the identity model

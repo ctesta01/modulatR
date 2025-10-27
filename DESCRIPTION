@@ -12,9 +12,12 @@ RoxygenNote: 7.2.3
 Imports: 
     R6,
     dplyr,
+    future,
+    future.apply,
     glmnet,
     lme4,
     magrittr,
+    memoise,
     mgcv,
     nadir,
     nnls,

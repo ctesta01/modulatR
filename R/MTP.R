@@ -1,226 +1,233 @@
-#' Modified Treatment Policy Class Constructor
-#'
-#' The MTP class facilitates the storing of the data and functions that specify
-#' and make it possible to use a piecewise smooth invertible policy.
-#'
-#' In the estimation of a modified treatment policy (MTP), one needs
-#' several ingredients in order to use the transformation of variables
-#' implied by the policy including: the inverse policy, the segments
-#' of the domain on which the policy is smooth and invertible, and the
-#' derivative of the policy on each segment.
-#'
-#' In the initialization of an MTP, we distinguish between
-#' the simplest case (no piecewise definition necessary) and the
-#' more complicated case where the function is defined in a piecewise
-#' manner.
-#'
-#' The non-piecewise case may be defined using a simplified syntax
-#' that does not involve wrapping every argument inside a `list()`.
-#'
-#' @export
-
-#' @examples
-#' \dontrun{
-#' # Imagine a policy that reduces the exposure by 5 for everyone:
-#'
-#' mtp <- MTP$new(
-#'   smooth_invertible_regions = function(A, L) { return(TRUE) },
-#'   policy = function(A, L) { A - 5 },
-#'   inverse_policy = function(A, L) { A + 5 },
-#'   derivative_of_policy = function(A, L) { 1 }
-#' )
-#' mtp$policy[[1]](5)
-#' mtp$which_region(A = data.frame(1), L = data.frame(1))
-#'
-#' # An improvement grounded in reality might be to specify that the policy
-#' # is a reduction of surgery duration by 5-minutes only when
-#' # the original/natural surgery duration was 5+ minutes to begin with:
-#'
-#' mtp <- MTP$new(
-#'   smooth_invertible_regions = list(
-#'     region1 = function(A, L) { return( A %btn[)% c(5, Inf) ) },
-#'     region2 = function(A, L) { return( A %btn[)% c(0, 5) ) }
-#'     ),
-#'   policy = list(
-#'     policy1 = function(A, L) { A - 5 },
-#'     policy2 = function(A, L) { A }
-#'     ),
-#'   inverse_policy = list(
-#'     function(A, L) { A + 5 },
-#'     function(A, L) { A }
-#'   ),
-#'   derivative_of_policy = list(
-#'     function(A, L) { 1 },
-#'     function(A, L) { 1 }
-#'     )
-#' )
-#' mtp$policy[[2]](5)
-#'
-#' example_df <- data.frame(
-#'   A = c(15, 4),
-#'   L = c(35, 25))
-#'
-#' mtp$which_region(example_df$A, example_df[,'L', drop=FALSE])
-#' mtp$apply_policy(example_df$A, example_df[,'L', drop=FALSE])
-#' }
-#'
-#'
 MTP <- R6::R6Class("MTP",
   public = list(
-    smooth_invertible_regions = NULL,
-    policy = NULL,
-    inverse_policy = NULL,
-    derivative_of_policy = NULL,
+    # ---- User-provided components (lists of same length)
+    region_predicates      = NULL, # list of f_j(A, L) -> TRUE/FALSE, whether d(A, L) lies in I_j where d=d_j
+    policy_pieces          = NULL, # list of d_j(A, L) -> A_star
+    inverse_map_pieces     = NULL, # list of b_j(A_star, L) -> A     (inverse of d_j on that piece's image)
+    inverse_deriv_pieces   = NULL, # list of db_j(A_star, L) -> d/dA_star b_j(A_star, L)
 
-    #' Initialize a Modified Treatment Policy (MTP)
-    #'
-    #' In order to specify an MTP, we require a specification of the
-    #' piecewise sections the policy is invertible over (domain),
-    #' the policy function (which we require to be defined piecewise
-    #' over the same segments of the policy-input-space, i.e., domain),
-    #' an inverse policy similarly piecewise defined, and its
-    #' derivative.
-    #'
-    #' Here, we have opted to require that the user specify these
-    #' rather than taking a computational approach to
-    #' estimating them from the policy function to avoid
-    #' 1) additional computing work [taking derivatives / testing for
-    #' invertibility, etc. can be computationally hard] and 2) more complex code
-    #' that may be challenging to debug.
-    #'
-    #' Defaults are not provided so that users do not forget to specify
-    #' every necessary part of an MTP
-    #'
-    #' We don't want users to accidentally only specify part of their policy
-    #' and use the defaults without realizing they've used the defaults that
-    #' may not match with their policy.
-    #' @param smooth_invertible_regions A list of functions that return true on
-    #'   the range of each smooth invertible component of the policy.
-    initialize = function(
-      smooth_invertible_regions,
-      policy,
-      inverse_policy,
-      derivative_of_policy
-    ) {
-      # Essentially we just need to store the passed objects in the
-      # MTP object created.
-      #
-      # Additionally, we support for convenience the option to pass
-      # solo functions when the policy applies equally to one region,
-      # like a policy that applies "to everyone" and is smooth/invertible
-      # everywhere without needing piecewise definition.   In such cases,
-      # the user can just pass solo functions and the constructor will
-      # automatically wrap them in an outer list() for convenience of
-      # declaring simple MTPs.
-      #
-      if (is.function(smooth_invertible_regions)) {
-        smooth_invertible_regions <- list(smooth_invertible_regions)
-      }
-      self$smooth_invertible_regions <- smooth_invertible_regions
+    # ---- Constructor
+    initialize = function(region_predicates,
+                          policy_pieces,
+                          inverse_map_pieces,
+                          inverse_deriv_pieces) {
 
-      if (is.function(policy)) {
-        policy <- list(policy)
-      }
-      self$policy <- policy
+      # Allow singletons (non-piecewise) for convenience -- turn them into a length=1 list
+      if (is.function(region_predicates))    region_predicates    <- list(region_predicates)
+      if (is.function(policy_pieces))        policy_pieces        <- list(policy_pieces)
+      if (is.function(inverse_map_pieces))   inverse_map_pieces   <- list(inverse_map_pieces)
+      if (is.function(inverse_deriv_pieces)) inverse_deriv_pieces <- list(inverse_deriv_pieces)
 
-      if (is.function(inverse_policy)) {
-        inverse_policy <- list(inverse_policy)
-      }
-      self$inverse_policy <- inverse_policy
+      # Pre-flight checks
+      stops <- c(
+        "region_predicates must be a non-empty list of functions" =
+          !(is.list(region_predicates) &&
+              length(region_predicates) > 0 &&
+              all(sapply(region_predicates, is.function))),
+        "policy_pieces must be a list of functions of the same length" =
+          !(
+            is.list(policy_pieces) &&
+              length(policy_pieces) == length(region_predicates) &&
+              all(sapply(policy_pieces, is.function))
+          ),
+        "inverse_map_pieces must be a list of functions of the same length" =
+          !(
+            is.list(inverse_map_pieces) &&
+              length(inverse_map_pieces) == length(region_predicates) &&
+              all(sapply(inverse_map_pieces, is.function))
+          ),
+        "inverse_deriv_pieces must be a list of functions of the same length" =
+          !(
+            is.list(inverse_deriv_pieces) &&
+              length(inverse_deriv_pieces) == length(region_predicates) &&
+              all(sapply(inverse_deriv_pieces, is.function))
+          )
+      )
+      bad <- names(stops)[unlist(stops)]
+      if (length(bad)) stop(paste(bad, collapse = "\n"))
 
-      if (is.function(derivative_of_policy)) {
-        derivative_of_policy <- list(derivative_of_policy)
-      }
-      self$derivative_of_policy <- derivative_of_policy
+      self$region_predicates    <- region_predicates
+      self$policy_pieces        <- policy_pieces
+      self$inverse_map_pieces   <- inverse_map_pieces
+      self$inverse_deriv_pieces <- inverse_deriv_pieces
     },
 
-  which_region_singleton = function(A, L) {
-    if (! length(A) == 1) {
-      stop("MTP$which_region_singleton() is meant for a single (A, L) pair at a time")
-    }
+    # ---- Helper: ensure L is a data frame with rows matching A
+    .coerce_AL = function(A, L) {
+      if (is.vector(L) || is.atomic(L)) L <- data.frame(L = L)
+      if (!is.data.frame(L)) stop("L must be a data.frame (or a vector/atomic, which will be wrapped).")
+      if (length(A) != nrow(L)) stop("A and L must have the same number of observations.")
+      list(A = as.vector(A), L = L)
+    },
 
-    # extract the first true index
-    first_true_index <- function(x) {
-      true_locations <- which(x)
-      if (length(true_locations) == 0) {
-        return(NA)
-      } else {
-        return(true_locations[[1]])
-      }
-    }
+    # ---- Which piece applies for a single (A, L) *by domain predicate on natural A*
+    piece_index_for_natural = function(A, L) {
+      if (length(A) != 1L) stop("Provide a single A for piece_index_for_natural().")
+      truth <- vapply(self$region_predicates, function(f) isTRUE(f(A, L)), logical(1))
+      idx <- which(truth)
+      if (length(idx) == 0L) return(NA_integer_)
+      if (length(idx) > 1L) stop(paste0("More than one region predicate applies to (A: ", A, ", L: ", L, ")"))
+      idx[[1]]
+    },
 
-    which_regions_apply <- sapply(
-      self$smooth_invertible_regions, function(f) {
-        f(A, L)
+    # ---- Vectorized: which piece for each (A, L) by *natural* A
+    piece_index_for_natural_vec = function(A, L) {
+      AL <- self$.coerce_AL(A, L)
+      A <- AL$A
+      L <- AL$L
+      vapply(seq_along(A), function(i) {
+        self$piece_index_for_natural(A[i], L[i, , drop = FALSE]) },
+        integer(1)
+        )
+    },
+
+    # ---- Forward application d_j(A,L) -> A_star (vectorized)
+    apply_policy = function(A, L) {
+      AL <- self$.coerce_AL(A, L); A <- AL$A; L <- AL$L
+      idx <- self$piece_index_for_natural_vec(A, L)
+      vapply(seq_along(A), function(i) {
+        j <- idx[i]
+        if (is.na(j)) return(NA_real_)
+        self$policy_pieces[[j]](A[i], L[i, , drop = FALSE])
+      }, numeric(1))
+    },
+
+    # ---- Given (A_star, L), find the appropriate pieces
+    # We try each piece: A_nat <- b_j(A_star,L); check predicate_j(A_nat,L) AND d_j(A_nat,L) == A_star (within tol)
+    .piece_indices_from_image = function(A_star, L, tol = 1e-8) {
+      which(vapply(seq_along(self$inverse_map_pieces), function(j) {
+        a_nat <- self$inverse_map_pieces[[j]](A_star, L)
+        ok_reg <- isTRUE(self$region_predicates[[j]](a_nat, L))
+        if (!ok_reg) return(FALSE)
+        a_fwd <- self$policy_pieces[[j]](a_nat, L)
+        is.finite(a_nat) && is.finite(a_fwd) && abs(a_fwd - A_star) <= tol
+      }, logical(1)))
+    },
+
+    # ---- Vectorized inverse: b_j(A_star, L) -> A
+    apply_inverse_policy = function(A_star, L, tol = 1e-8) {
+      AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
+      lapply(seq_along(A_star), function(i) {
+        js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
+        if (length(js) == 0L) return(numeric(0))
+        vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
       })
+    },
 
-    which_region_applies <- first_true_index(which_regions_apply)
+    # ---- Jacobian for change-of-variables: b'_j(A_star, L)
+    inverse_derivative = function(A_star, L, tol = 1e-8) {
+      AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
+      lapply(seq_along(A_star), function(i) {
+        js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
+        if (length(js) == 0L) return(numeric(0))
+        vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+      })
+    },
 
-    return(which_region_applies)
-  },
+    # Piecewise contributions for g^d at (A*, L) given a density function g(a | L)
+    # density_fun takes (a_vec, L_row_df) -> numeric vector of densities
+    gd_contributions = function(A_star, L, density_fun, tol = 1e-8) {
+      AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
+      lapply(seq_along(A_star), function(i) {
+        js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
+        if (length(js) == 0L) return(
+          data.frame(piece = integer(0), a_pre = numeric(0), jac = numeric(0),
+                     dens = numeric(0), term = numeric(0))
+        )
+        a_pre  <- vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+        jac    <- vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
+        dens   <- density_fun(a_pre, L[i, , drop = FALSE])
+        data.frame(piece = js, a_pre = a_pre, jac = jac, dens = dens,
+                   term = abs(jac) * dens, row.names = NULL)
+      })
+    },
 
-  which_region_vectorized = function(A, L) {
-    if (is.vector(L)) {
-      L <- data.frame(L = L)
+    # Sum over pieces to get g^d(A* | L) (vectorized over rows)
+    gd_from_density = function(A_star, L, density_fun, tol = 1e-8) {
+      contribs <- self$gd_contributions(A_star, L, density_fun, tol = tol)
+      vapply(contribs, function(df) if (nrow(df) == 0) 0 else sum(df$term), numeric(1))
+    },
+
+    # ---- Diagnostics: check that d_j(b_j(a*,L),L) ~= a* on a grid of a* values you pass
+    validate_bijections = function(A_star_grid, L, tol = 1e-6) {
+      A_back  <- self$apply_inverse_policy(A_star_grid, L)
+      A_fwd   <- self$apply_policy(A_back, L)
+      data.frame(A_star = A_star_grid, A_back = A_back, A_fwd = A_fwd,
+                 ok = is.finite(A_back) & is.finite(A_fwd) & (abs(A_fwd - A_star_grid) <= tol))
     }
-
-    if (length(A) != nrow(L)) {
-      stop("A and L have incompatible dimensions")
-    }
-
-    which_regions_apply <- sapply(1:length(A), function(i) {
-      self$which_region_singleton(A[i], L[i,])
-    })
-
-    return(which_regions_apply)
-  },
-
-  apply_policy = function(A, L) {
-    if (is.vector(L)) {
-      L <- data.frame(L)
-    }
-
-    # determine which region applies to
-    which_region_applies <- self$which_region_vectorized(A, L)
-
-    # TODO: handle that we're requiring L to be a data frame of covariates
-    # TODO: what happens if L is empty?
-    updated_A <- sapply(
-      1:length(which_region_applies),
-      function(i) {
-        if (is.na(which_region_applies[[i]])) {
-          return(NA)
-        } else {
-          return(self$policy[[which_region_applies[[i]]]](A[[i]], L[i, ]))
-        }
-      }
-      )
-
-    return(updated_A)
-  },
-
-  apply_inverse_policy = function(A, L) {
-    if (is.vector(L)) {
-      L <- data.frame(L)
-    }
-
-    # determine which region applies to
-    which_region_applies <- self$which_region_vectorized(A, L)
-
-    # TODO: handle that we're requiring L to be a data frame of covariates
-    # TODO: what happens if L is empty?
-    updated_A <- sapply(
-      1:length(which_region_applies),
-      function(i) {
-        if (is.na(which_region_applies[[i]])) {
-          return(NA)
-        } else {
-          return(self$inverse_policy[[which_region_applies[[i]]]](A[[i]], L[i, ]))
-        }
-      }
-    )
-
-    return(updated_A)
-  }
   )
 )
+
+# Helpers to coerce scalar-or-function into function(L)->scalar
+#' @keywords internal
+.num_to_fun <- function(x) if (is.function(x)) x else (function(L) x)
+
+#' Additive-shift MTP Construction Helper
+#'
+#' d(A,L) = A + delta  if lower(L) <= A + delta <= upper(L), else A
+#' Inverse branches for a* are: a* - delta (shift piece), a* (identity piece).
+mtp_additive_shift <- function(delta,
+                               lower = -Inf,
+                               upper =  Inf) {
+  lower_fun <- .num_to_fun(lower)
+  upper_fun <- .num_to_fun(upper)
+
+  # piece 1: shift feasible
+  pred_shift <- function(A, L) {
+    lo <- lower_fun(L); hi <- upper_fun(L)
+    isTRUE(A + delta >= lo && A + delta <= hi)
+  }
+  d_shift   <- function(A, L) A + delta
+  b_shift   <- function(A_star, L) A_star - delta   # inverse on image
+  db_shift  <- function(A_star, L) 1                # d/dA* of b_shift
+
+  # piece 2: otherwise identity
+  pred_id   <- function(A, L) !isTRUE(pred_shift(A, L))
+  d_id      <- function(A, L) A
+  b_id      <- function(A_star, L) A_star
+  db_id     <- function(A_star, L) 1
+
+  MTP$new(
+    region_predicates    = list(pred_shift, pred_id),
+    policy_pieces        = list(d_shift,     d_id),
+    inverse_map_pieces   = list(b_shift,     b_id),
+    inverse_deriv_pieces = list(db_shift,    db_id)
+  )
+}
+
+#' Multiplicative-shift MTP Construction Helper
+#'
+#' d(A,L) = k * A  if lower(L) <= k*A <= upper(L), else A
+#' Inverse branches for a* are: a*/k (shift piece), a* (identity).
+#' Note: require k != 0; for k<0 the mapping flips order but is still invertible.
+mtp_multiplicative_shift <- function(k,
+                                     lower = 0,
+                                     upper = Inf) {
+  if (k == 0) stop("k must be non-zero for invertibility.")
+  lower_fun <- .num_to_fun(lower)
+  upper_fun <- .num_to_fun(upper)
+
+  pred_mult <- function(A, L) {
+    lo <- lower_fun(L); hi <- upper_fun(L)
+    a_star <- k * A
+    isTRUE(a_star >= lo && a_star <= hi)
+  }
+  d_mult  <- function(A, L) k * A
+  b_mult  <- function(A_star, L) A_star / k
+  db_mult <- function(A_star, L) 1 / k
+
+  pred_id <- function(A, L) !isTRUE(pred_mult(A, L))
+  d_id    <- function(A, L) A
+  b_id    <- function(A_star, L) A_star
+  db_id   <- function(A_star, L) 1
+
+  MTP$new(
+    region_predicates    = list(pred_mult,  pred_id),
+    policy_pieces        = list(d_mult,     d_id),
+    inverse_map_pieces   = list(b_mult,     b_id),
+    inverse_deriv_pieces = list(db_mult,    db_id)
+  )
+}
+
+
+

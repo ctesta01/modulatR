@@ -1,0 +1,47 @@
+---
+title: "TargetedLearning"
+output: html_document
+---
+
+```{r}
+library(TargetedLearning)
+
+set.seed(1)
+dat <- tibble::tibble(
+  W = rnorm(400),
+  A = rnorm(400, mean = 5 + W, sd = .1),
+  Y = rnorm(400, mean = 0.2 + 0.5*A + 0.2*W, sd = .3)
+)
+
+# Example MTP: additive shift by delta with bounds (helpers you provided)
+delta <- 0.5
+cont_mtp <- mtp_additive_shift(delta = delta, lower = -Inf, upper = Inf)
+
+spec <- MTPParameter$new(mtp = cont_mtp, A_type = "continuous",
+                           nodes = list(W="W", A="A", Y="Y"))
+
+nuis <- MTPNuisanceFactory$new(
+  learners_Q = list(nadir::lnr_glm, nadir::lnr_rf),
+  learners_g = list(nadir::lnr_glm, nadir::lnr_rf),
+  fml_Q = Y ~ A + .,
+  mtp = cont_mtp,
+  A_type = "continuous",
+)
+
+submod <- IdentityFluctuation$new()  # or LogisticFluctuation with bounds for Y-range
+eng <- TMLEEngine$new(spec, nuis, submod)
+eng$set_fit_method(fit_tmle_for_MTP)
+fit <- eng$fit(dat)
+fit$psi; fit$ci95
+
+id_mtp <- mtp_additive_shift(delta = 0, lower = -Inf, upper = Inf)
+id_spec <- MTPParameter$new(mtp = id_mtp, A_type = "continuous",
+                           nodes = list(W="W", A="A", Y="Y"))
+
+eng <- TMLEEngine$new(id_spec, nuis, submod)
+eng$set_fit_method(fit_tmle_for_MTP)
+fit <- eng$fit(dat)
+fit$psi; fit$ci95
+
+
+```

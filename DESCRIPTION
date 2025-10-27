@@ -1,5 +1,5 @@
 Package: modulatR
-Title:  Longitudinal Modified Treatment Policies Modulated by Subgroup Effects
+Title: Longitudinal Modified Treatment Policies Modulated by Subgroup Effects
 Version: 0.0.0.1000
 Authors@R: 
     person("Christian", "Testa", , "ctesta@hsph.harvard.edu", role = c("aut", "cre"),
@@ -20,10 +20,13 @@ Imports:
     nnls,
     randomForest,
     ranger,
+    TargetedLearning,
     tibble,
     tidyr
 Suggests:
     knitr,
-    rmarkdown
+    rmarkdown,
+    testthat (>= 3.0.0)
 Config/Needs/website: rmarkdown
 VignetteBuilder: knitr
+Config/testthat/edition: 3

@@ -1,0 +1,119 @@
+
+
+
+```{r}
+can_reduce_5  <- function(A, L) isTRUE(A >= 5)
+cannot_reduce <- function(A, L) isTRUE(A < 5)
+
+d_reduce_5    <- function(A, L) A - 5
+d_identity    <- function(A, L) A
+
+b_reduce_5    <- function(A_star, L) A_star + 5
+b_identity    <- function(A_star, L) A_star
+
+db_reduce_5   <- function(A_star, L) 1
+db_identity   <- function(A_star, L) 1
+
+mtp <- MTP$new(
+  region_predicates    = list(can_reduce_5, cannot_reduce),
+  policy_pieces        = list(d_reduce_5,  d_identity),
+  inverse_map_pieces   = list(b_reduce_5,  b_identity),
+  inverse_deriv_pieces = list(db_reduce_5, db_identity)
+)
+
+# Suppose g(a | L) is Normal with mean 4 and sd 2 (toy example):
+g_density <- function(a_vec, L_row) dnorm(a_vec, mean = 4, sd = 2)
+
+L <- data.frame(mu = 4)
+Astar <- c(2.5, 6)
+
+# Contributions per obs (lists of data.frames)
+contribs <- mtp$gd_contributions(Astar, L[rep(1, length(Astar)), , drop = FALSE], g_density)
+
+# Summed g^d(A*|L) over all valid inverse branches
+gd <- mtp$gd_from_density(Astar, L[rep(1, length(Astar)), , drop = FALSE], g_density)
+
+
+
+
+
+
+# --- Your pre-distribution g(a|L) ---
+g_density <- function(a_vec, L_row) dnorm(a_vec, mean = 4, sd = 2)
+
+# We'll visualize at a single L (no L-dependence here, but keep the API)
+Lviz <- data.frame(dummy = 1)
+
+# Grid wide enough to capture mass both before & after the shift
+a_grid <- seq(-4, 16, by = 0.01)
+
+# Pre-policy density g(a)
+g_pre <- g_density(a_grid, Lviz)
+
+# Post-policy density g^d(a*) = sum_j g(b_j(a*))/|det J|
+g_post <- mtp$gd_from_density(a_grid, Lviz[rep(1, length(a_grid)), , drop = FALSE], g_density)
+
+# Quick sanity: both integrate ~ 1
+dx <- diff(a_grid)[1]
+pre_mass  <- sum(g_pre)  * dx
+post_mass <- sum(g_post) * dx
+cat(sprintf("∫ g(a) da ≈ %.4f;   ∫ g^d(a*) da ≈ %.4f\n", pre_mass, post_mass))
+
+# Plot with ggplot2
+library(ggplot2)
+df <- data.frame(
+  a = a_grid,
+  `Pre-policy  g(a)`   = g_pre,
+  `Post-policy g^d(a)` = g_post
+)
+df_long <- tidyr::pivot_longer(df, cols = -a, names_to = "density", values_to = "value")
+
+ggplot(df_long, aes(x = a, y = value, linetype = density)) +
+  geom_line(linewidth = 0.9) +
+  labs(x = "a", y = "Density", linetype = NULL,
+       title = "Pre vs. Post MTP Density",
+       subtitle = "Policy: d(A) = A - 5 if A ≥ 5, else A") +
+  theme_minimal(base_size = 13)
+
+
+
+# --- Your pre-distribution g(a|L): Lognormal ---
+# For example: underlying normal has meanlog = 1, sdlog = 0.5
+g_density <- function(a_vec, L_row) {
+  dlnorm(a_vec, meanlog = 1, sdlog = .75)
+}
+
+# We'll visualize at a single L (no L-dependence here, but keep the API)
+Lviz <- data.frame(dummy = 1)
+
+# Grid must be positive (lognormal support)
+a_grid <- seq(0, 20, by = 0.01)
+
+# Pre-policy density g(a)
+g_pre <- g_density(a_grid, Lviz)
+
+# Post-policy density g^d(a*) = sum_j g(b_j(a*))/|det J|
+g_post <- mtp$gd_from_density(a_grid, Lviz[rep(1, length(a_grid)), , drop = FALSE], g_density)
+
+# Quick sanity: both integrate ~ 1 (numerically)
+dx <- diff(a_grid)[1]
+pre_mass  <- sum(g_pre)  * dx
+post_mass <- sum(g_post) * dx
+cat(sprintf("∫ g(a) da ≈ %.4f;   ∫ g^d(a*) da ≈ %.4f\n", pre_mass, post_mass))
+
+# Plot 
+df <- data.frame(
+  a = a_grid,
+  `Pre-policy  g(a)`   = g_pre,
+  `Post-policy g^d(a)` = g_post
+)
+df_long <- tidyr::pivot_longer(df, cols = -a, names_to = "density", values_to = "value")
+
+ggplot(df_long, aes(x = a, y = value, linetype = density)) +
+  geom_line(linewidth = 0.9) +
+  labs(x = "a", y = "Density", linetype = NULL,
+       title = "Pre vs. Post MTP Density (Lognormal Exposure)",
+       subtitle = "Policy: d(A) = A - 5 if A ≥ 5, else A") +
+  theme_minimal(base_size = 13) +
+  xlim(c(0,8))
+```

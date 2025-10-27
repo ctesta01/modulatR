@@ -163,19 +163,16 @@ fit_tmle_for_MTP <- function(data, bounds = NULL, maxit = 3, eps_tol = 1e-5) {
 
     # One targeting step: offset is link(QAW), covariate is H = r(A,L)
     up <- self$submodel$update_Q(
-      preds = list(
-        QAW = preds$QAW,
-        Q1W = preds$QdW,   # not used internally but required by API; harmless
-        Q0W = preds$QdW    # ditto
-      ),
-      eif = eif,
-      data = data,
-      A = A,
-      Y = data[[Yname]],
-      g1W = function(nd) preds$rAL(nd)  # we pass H through g1W arg slot; submodel uses it to build h
+      preds = list(QAW = preds$QAW),  # only need base Q(A,L)
+      eif   = eif,
+      data  = data,
+      A     = A,
+      Y     = data[[Yname]],
+      rAL   = preds$rAL
     )
     # Compose updated closures for Q(A,L); QdW remains a separate prediction of m(d(A,L),L)
     preds$QAW <- up$QAW
+    preds$QdW <- up$QdW
     eps <- up$epsilon
     iter <- iter + 1
   }
@@ -198,4 +195,137 @@ fit_tmle_for_MTP <- function(data, bounds = NULL, maxit = 3, eps_tol = 1e-5) {
   )
   class(out) <- c("tmle_mtp","list"); out
 }
+
+
+# --- MTP-specific fluctuation submodels --------------------------------------
+
+# Both classes:
+# - take an MTP instance in initialize(mtp = ...)
+# - fit epsilon with offset(link(Q(A,L))) and covariate H = r(A,L)
+# - return UPDATED closures:
+#       $QAW(newdata)  = Q*(A,L)
+#       $QdW(newdata)  = Q*(d(A,L), L)
+#   where the same epsilon is applied with h(a,l)=r(a,l) evaluated at each 'a'
+#   (observed A for QAW; counterfactual A* = d(A,L) for QdW).
+#
+# Note: update_Q signature uses (preds, eif, data, A, Y, rAL)
+
+LogisticFluctuationMTP <- R6::R6Class(
+  "LogisticFluctuationMTP",
+  inherit = FluctuationSubmodel,
+  public = list(
+    mtp = NULL,
+    truncation_alpha = 1e-6,
+    initialize = function(
+    mtp,
+    bounds = c(0, 1),
+    truncation_alpha = 1e-6,
+    family = binomial(link = "logit")
+    ) {
+      self$mtp <- mtp
+      self$truncation_alpha <- truncation_alpha
+      super$initialize(
+        name   = "logit_mtp",
+        link   = list(link = qlogis, inv = plogis),
+        bounds = bounds,
+        family = family
+      )
+    },
+    update_Q = function(preds, eif, data, A, Y, rAL) {
+      # r(A,L) provider
+      rAL_fun <- rAL
+      A_sym   <- rlang::sym(A)
+
+      # --- helpers for bounds transform ---
+      a <- self$bounds[1]; b <- self$bounds[2]
+      to01   <- function(x) (x - a) / (b - a)
+      from01 <- function(z) a + (b - a) * z
+      clamp01 <- function(z) pmin(pmax(z, self$truncation_alpha), 1 - self$truncation_alpha)
+
+      # --- base predictions on observed A ---
+      base_QAW <- preds$QAW
+      QAW0     <- base_QAW(data)
+
+      # --- fit epsilon: Y01 ~ -1 + H + offset(logit(QAW0_01)) ---
+      zQAW <- self$link$link(clamp01(to01(QAW0)))
+      H    <- eif$K[, 1]                       # H_i = r(A_i, L_i)
+      df   <- data.frame(Y01 = clamp01(to01(Y)), H = H)
+      fit  <- stats::glm(Y01 ~ -1 + H + offset(zQAW),
+                         family = self$family, data = df)
+      eps  <- unname(coef(fit)[["H"]]); if (is.na(eps)) eps <- 0
+
+      # --- updater on arbitrary (a,l): Q*(a,l) = invlink(link(Q0(a,l)) + eps * r(a,l)) ---
+      updater <- function(Q0, h) {
+        from01(self$link$inv(self$link$link(clamp01(to01(Q0))) + eps * h))
+      }
+
+      QAW_updated <- function(newdata) {
+        h  <- rAL_fun(newdata)               # r(A,L) at observed A in newdata
+        Q0 <- base_QAW(newdata)
+        updater(Q0, h)
+      }
+
+      QdW_updated <- function(newdata) {
+        # form A* = d(A,L), then evaluate both r(A*,L) and base Q at that A*
+        Ldf   <- newdata[, setdiff(names(newdata), A), drop = FALSE]
+        Astar <- self$mtp$apply_policy(newdata[[A]], Ldf)
+        nd_star  <- dplyr::mutate(newdata, !!A_sym := Astar)
+
+        h_star  <- rAL_fun(nd_star)
+        Q0_star <- base_QAW(nd_star)
+        updater(Q0_star, h_star)
+      }
+
+      list(QAW = QAW_updated, QdW = QdW_updated, epsilon = eps)
+    }
+  )
+)
+
+IdentityFluctuationMTP <- R6::R6Class(
+  "IdentityFluctuationMTP",
+  inherit = FluctuationSubmodel,
+  public = list(
+    mtp = NULL,
+    initialize = function(mtp) {
+      self$mtp <- mtp
+      super$initialize(
+        name   = "identity_mtp",
+        link   = list(link = function(x) x, inv = function(x) x),
+        bounds = NULL,
+        family = gaussian()
+      )
+    },
+    update_Q = function(preds, eif, data, A, Y, rAL) {
+      rAL_fun <- rAL
+      A_sym   <- rlang::sym(A)
+
+      base_QAW <- preds$QAW
+      QAW0     <- base_QAW(data)
+      H        <- eif$K[, 1]
+
+      fit <- stats::glm(Y ~ -1 + H + offset(QAW0), family = gaussian())
+      eps <- unname(coef(fit)[["H"]]); if (is.na(eps)) eps <- 0
+
+      updater <- function(Q0, h) Q0 + eps * h
+
+      QAW_updated <- function(newdata) {
+        h  <- rAL_fun(newdata)
+        Q0 <- base_QAW(newdata)
+        updater(Q0, h)
+      }
+
+      QdW_updated <- function(newdata) {
+        Ldf   <- newdata[, setdiff(names(newdata), A), drop = FALSE]
+        Astar <- self$mtp$apply_policy(newdata[[A]], Ldf)
+        nd_star  <- dplyr::mutate(newdata, !!A_sym := Astar)
+
+        h_star  <- rAL_fun(nd_star)
+        Q0_star <- base_QAW(nd_star)
+        updater(Q0_star, h_star)
+      }
+
+      list(QAW = QAW_updated, QdW = QdW_updated, epsilon = eps)
+    }
+  )
+)
 

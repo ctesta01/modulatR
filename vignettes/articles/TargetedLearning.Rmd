@@ -28,20 +28,30 @@ nuis <- MTPNuisanceFactory$new(
   A_type = "continuous",
 )
 
-submod <- IdentityFluctuation$new()  # or LogisticFluctuation with bounds for Y-range
+submod <- IdentityFluctuationMTP$new(mtp = cont_mtp)  # or LogisticFluctuationMTP with bounds for Y-range
 eng <- TMLEEngine$new(spec, nuis, submod)
 eng$set_fit_method(fit_tmle_for_MTP)
 fit <- eng$fit(dat)
 fit$psi; fit$ci95
 
+
+# fit the identity model
+
 id_mtp <- mtp_additive_shift(delta = 0, lower = -Inf, upper = Inf)
 id_spec <- MTPParameter$new(mtp = id_mtp, A_type = "continuous",
                            nodes = list(W="W", A="A", Y="Y"))
+id_nuis <- MTPNuisanceFactory$new(
+  learners_Q = list(nadir::lnr_glm, nadir::lnr_rf),
+  learners_g = list(nadir::lnr_glm, nadir::lnr_rf),
+  fml_Q = Y ~ A + .,
+  mtp = id_mtp,
+  A_type = "continuous",
+)
+id_submod <- IdentityFluctuationMTP$new(mtp = id_mtp) 
 
-eng <- TMLEEngine$new(id_spec, nuis, submod)
+eng <- TMLEEngine$new(id_spec, id_nuis, id_submod)
 eng$set_fit_method(fit_tmle_for_MTP)
 fit <- eng$fit(dat)
 fit$psi; fit$ci95
-
 
 ```

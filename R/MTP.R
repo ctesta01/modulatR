@@ -128,7 +128,7 @@ MTP <- R6::R6Class("MTP",
     # density_fun takes (a_vec, L_row_df) -> numeric vector of densities
     gd_contributions = function(A_star, L, density_fun, tol = 1e-8) {
       AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      lapply(seq_along(A_star), function(i) {
+      contributions <- lapply(seq_along(A_star), function(i) {
         js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
         if (length(js) == 0L) return(
           data.frame(piece = integer(0), a_pre = numeric(0), jac = numeric(0),
@@ -136,16 +136,30 @@ MTP <- R6::R6Class("MTP",
         )
         a_pre  <- vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
         jac    <- vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
-        dens   <- density_fun(a_pre, L[i, , drop = FALSE])
-        data.frame(piece = js, a_pre = a_pre, jac = jac, dens = dens,
-                   term = abs(jac) * dens, row.names = NULL)
+        # dens   <- density_fun(a_pre, L[i, , drop = FALSE])
+        L_repeated <- L[rep(i, length(js)), , drop = FALSE]
+        contributions <- data.frame(i = i, piece = js, a_pre = a_pre, jac = jac, L_repeated, row.names = NULL)
+        # contributions <- dplyr::bind_cols(contributions, L_repeated)
+        return(contributions)
       })
+      contributions <- bind_rows(contributions)
+
+      # print(colnames(L))
+      # print(colnames(contributions))
+      # print(contributions)
+      contributions$dens <- density_fun(contributions$a_pre, contributions[,colnames(L)])
+      contributions$term <- abs(contributions$jac) * contributions$dens
+      return(contributions)
     },
 
     # Sum over pieces to get g^d(A* | L) (vectorized over rows)
     gd_from_density = function(A_star, L, density_fun, tol = 1e-8) {
       contribs <- self$gd_contributions(A_star, L, density_fun, tol = tol)
-      vapply(contribs, function(df) if (nrow(df) == 0) 0 else sum(df$term), numeric(1))
+      # vapply(contribs, function(df) if (nrow(df) == 0) 0 else sum(df$term), numeric(1))
+      contribs <- contribs |> group_by(i) |>
+        summarize(term = sum(term)) |>
+        pull(term)
+      contribs
     },
 
     # ---- Diagnostics: check that d_j(b_j(a*,L),L) ~= a* on a grid of a* values you pass

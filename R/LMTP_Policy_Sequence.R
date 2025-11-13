@@ -192,7 +192,7 @@ LMTPNuisanceFactory <- R6::R6Class(
     learners_g = NULL,  # list length T (or single spec) of {nadir} learner libraries for g_t
     fml_g = NULL,       # optional list length T of formulas for g_t
     learners_g_extra_args = NULL, # list length T or single spec of learner extra arguments
-    A_type = NULL,      # "continuous" or "discrete" per time? assume global for now
+    A_type = NULL,      # "continuous" or "discrete" per time?
     policy_seq = NULL,  # LMTPPolicySequence
     repeat_fmls_lnrs_args = NULL, # a binary indicator TRUE/FALSE to repeat arguments to length T
 
@@ -292,21 +292,32 @@ LMTPKProvider <- R6::R6Class(
   "LMTPKProvider",
   public = list(
     r_list = NULL, ds = NULL,
-    initialize = function(r_list, ds) { self$r_list <- r_list; self$ds <- ds },
-    K_obs = function(t) {
-      n <- nrow(self$ds$data); K <- rep(1, n)
-      for (k in seq_len(t)) K <- K * self$r_list[[k]](self$ds$A(k), self$ds$H(k))
-      K
-    },
-    # evaluate K_t at arbitrary (A,H) for the t-th factor, observed for earlier ones
-    K_eval = function(t, A_vec, H_df) {
-      n <- nrow(H_df); K <- rep(1, n)
-      for (k in seq_len(t)) {
-        if (k == t) K <- K * self$r_list[[k]](A_vec, H_df)
-        else        K <- K * self$r_list[[k]](self$ds$A(k), self$ds$H(k))
+    K_obs_t = NULL,
+    initialize = function(r_list, ds) {
+      self$r_list <- r_list; self$ds <- ds
+      K_obs_t <- vector("list", length = ds$tau())
+
+      n <- nrow(self$ds$data)
+      for (t in seq_len(ds$tau())) {
+        K <- rep(1, n)
+        for (k in seq_len(t)) {
+          K <- K * self$r_list[[k]](self$ds$A(k), self$ds$H(k))
+        }
+        self$K_obs_t[[t]] <- K
       }
-      K
-    }
+    },
+    K_obs = function(t) {
+      self$K_obs_t[[t]]
+    }# ,
+    # evaluate K_t at arbitrary (A,H) for the t-th factor, observed for earlier ones
+    # K_eval = function(t, A_vec, H_df) {
+    #   n <- nrow(H_df); K <- rep(1, n)
+    #   for (k in seq_len(t)) {
+    #     if (k == t) K <- K * self$r_list[[k]](A_vec, H_df)
+    #     else        K <- K * self$r_list[[k]](self$ds$A(k), self$ds$H(k))
+    #   }
+    #   K
+    # }
   )
 )
 
@@ -349,10 +360,10 @@ LMTPQTrainer <- R6::R6Class(
 LMTPFluctuationIdentity <- R6::R6Class(
   "LMTPFluctuationIdentity",
   public = list(
-    fit_update = function(Q0_fun_t, target_vec, K_obs_t, Kprov, t) {
+    fit_update = function(Q0_fun_t, Qvec, target_vec, K_obs_t, Kprov, t) {
       # GLM: target ~ -1 + K_obs_t + offset(Q0(A_t,H_t))
       # caller must pass Q0(A_t,H_t) as the offset argument
-      fit <- stats::glm(target_vec ~ -1 + K_obs_t, family = gaussian()) # we'll supply offset externally
+      fit <- stats::glm(target_vec ~ -1 + offset(Qvec) + K_obs_t, family = gaussian())
       # Better: fit with explicit offset vector:
       # but base R's glm needs offset as vector in model.frame; we emulate by:
       eps <- tryCatch(unname(coef(fit)[["K_obs_t"]]), error = function(e) NA_real_)
@@ -360,7 +371,7 @@ LMTPFluctuationIdentity <- R6::R6Class(
 
       # Return an updater that can evaluate at arbitrary (A,H)
       updater <- function(A_vec, H_df, offset_val) {
-        offset_val + eps * Kprov$K_eval(t, A_vec, H_df)
+        offset_val + eps * Kprov$K_obs(t)
       }
 
       list(epsilon = eps,
@@ -384,18 +395,19 @@ LMTPFluctuationLogit <- R6::R6Class(
     .from01 = function(z) self$a + (self$b - self$a)*z,
     .b01 = function(z) pmin(pmax(z, self$trunc), 1 - self$trunc),
 
-    fit_update = function(Q0_fun_t, target_vec, K_obs_t, Kprov, t) {
+    fit_update = function(Q0_fun_t, Qvec, target_vec, K_obs_t, Kprov, t) {
       Y01 <- self$.to01(target_vec)
-      # offset: logit( clamp( to01( Q0(A_t,H_t) ) ) ) — supply as vector:
-      # We'll compute the offset in the engine to avoid duplicating data access.
-      fit <- stats::glm(Y01 ~ -1 + K_obs_t, family = binomial())
+      # the offset should be on the link scale
+      # logit( b01( to01( Q0(A_t,H_t) ) ) ) — supply as vector:
+      fit <- stats::glm(Y01 ~ -1 + offset(self$.b01(self$.to01(Qvec))) + K_obs_t,
+                        family = binomial())
       eps <- tryCatch(unname(coef(fit)[["K_obs_t"]]), error = function(e) NA_real_)
       if (is.na(eps)) eps <- 0
       list(
         epsilon = eps,
         wrap = function(A_vec, H_df) {
           Q0 <- Q0_fun_t(A_vec, H_df)
-          z  <- qlogis(self$.b01(self$.to01(Q0))) + eps * Kprov$K_eval(t, A_vec, H_df)
+          z  <- qlogis(self$.b01(self$.to01(Q0))) + eps * Kprov$K_obs(t)
           self$.from01(plogis(z))
         }
       )
@@ -414,8 +426,10 @@ fit_tmle_for_LMTP <- function(
     bounds = c(0,1),
     maxit = 1,                  # outer iterations if you want (usually 1 is fine)
     eps_tol = 1e-6,
-    repeat_lnrs = TRUE
+    repeat_lnrs = TRUE,
+    method = c('tmle', 'outcome', 'ipw')
 ) {
+  method <- match.arg(method)
   outcome_link <- match.arg(outcome_link)
   tau <- ds$tau()
 
@@ -469,12 +483,19 @@ fit_tmle_for_LMTP <- function(
       K_obs_t <- Kprov$K_obs(t)
 
       # fit ε_t and wrap Q_t^*:
-      up <- fluct$fit_update(Q0_fun_t = Q0_t,
-                             target_vec = target_vec,
-                             K_obs_t = K_obs_t,
-                             Kprov = Kprov, t = t)
-      eps <- up$epsilon
-      Q_star[[t]] <- up$wrap
+      if (method == 'tmle') {
+        Qvec <- Q0_t(ds$A(t), ds$H(t))
+        up <- fluct$fit_update(Q0_fun_t = Q0_t,
+                               Qvec = Qvec,
+                               target_vec = target_vec,
+                               K_obs_t = K_obs_t,
+                               Kprov = Kprov, t = t)
+        eps <- up$epsilon
+        Q_star[[t]] <- up$wrap
+      } else {
+        Q_star[[t]] <- Q0_t
+        eps <- 0
+      }
 
       # carry upstream the *fluctuated* pseudo-outcome: tilde_m_t(a^d_t, h_t)
       Astar_t <- policy_seq$apply_policy_t(t, ds$A(t), Ht)
@@ -487,29 +508,40 @@ fit_tmle_for_LMTP <- function(
   # 5) Estimand and influence curve (using initial η if you prefer; or plug-in with Q*)
   H1 <- ds$H(1)
   Astar1 <- policy_seq$apply_policy_t(1, ds$A(1), H1)
-  psi_hat <- mean(Q_star[[1]](Astar1, H1))
+  if (method %in% c('tmle', 'outcome')) {
+    psi_hat <- mean(Q_star[[1]](Astar1, H1))
+  } else if (method == 'ipw') {
+    psi_hat <- mean(Kprov$K_obs(tau) * ds$Y())
+  }
 
   # EIF with initial r and unfluctuated Q0
-  w <- rep(1, nrow(ds$data))
-  phi <- rep(0, nrow(ds$data))
-  for (t in seq_len(tau)) {
-    Ht <- ds$H(t)
-    mt_obs <- Q_star[[t]](ds$A(t), Ht)  # should switch to initial Q0_t ... after storing
-    mnext <- if (t < tau) {
-      Hnext <- ds$H(t + 1)
-      Q_star[[t + 1]](policy_seq$apply_policy_t(t + 1, ds$A(t + 1), Hnext), Hnext)
-    } else ds$Y()
-    w <- w * r_list[[t]](ds$A(t), Ht)
-    phi <- phi + w * (mnext - mt_obs)
+  if (method == 'tmle') {
+    w <- rep(1, nrow(ds$data))
+    phi <- rep(0, nrow(ds$data))
+    for (t in seq_len(tau)) {
+      Ht <- ds$H(t)
+      mt_obs <- Q_star[[t]](ds$A(t), Ht)  # should switch to initial Q0_t ... after storing
+      mnext <- if (t < tau) {
+        Hnext <- ds$H(t + 1)
+        Q_star[[t + 1]](policy_seq$apply_policy_t(t + 1, ds$A(t + 1), Hnext), Hnext)
+      } else ds$Y()
+      w <- w * r_list[[t]](ds$A(t), Ht)
+      phi <- phi + w * (mnext - mt_obs)
+    }
+    plug <- Q_star[[1]](Astar1, H1)
+    ic <- phi + plug - psi_hat
+    se <- sqrt(stats::var(ic) / nrow(ds$data))
+    ci95 <- c(psi_hat - 1.96*se, psi_hat + 1.96*se)
+  } else if (method != 'tmle') {
+    se <-  NA
+    ci95 <- c(NA, NA)
+    ic <- NA
   }
-  plug <- Q_star[[1]](Astar1, H1)
-  ic <- phi + plug - psi_hat
-  se <- sqrt(stats::var(ic) / nrow(ds$data))
 
   structure(list(
     psi = psi_hat,
     se = se,
-    ci95 = c(psi_hat - 1.96*se, psi_hat + 1.96*se),
+    ci95 = ci95,
     ic = ic,
     Q = Q_star,
     r = r_list

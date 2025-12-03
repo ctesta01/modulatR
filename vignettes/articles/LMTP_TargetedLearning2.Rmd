@@ -1,0 +1,126 @@
+---
+title: "LMTP_TargetedLearning2"
+output: html_document
+---
+
+```{r}
+devtools::load_all(".")
+
+# ---- Setup ----
+set.seed(2025)
+library(simcausal)
+library(TargetedLearning)
+library(dplyr)
+
+# n: sample size
+n <- 1000
+
+# ---- DAG specification in simcausal ----
+D <- DAG.empty()
+tau <- 2
+
+# Baseline covariates
+D <- D +
+  node("W1", distr = "rnorm", mean = 0, sd = 1) +
+  node("W2", distr = "rbern", prob = 0.5)
+
+# Two time-varying covariates at each t = 1,2,...
+# Using a single node name with t=1:tau and then we'll rename to L11, L21, etc.
+D <- D +
+  node("L1", t = 1:tau, distr = "rnorm",
+       mean =  0.8*W1 + 0.5*W2 + 0.2*t, sd = 1) +
+  node("L2", t = 1:tau, distr = "rnorm",
+       mean = -0.3*W1 + 0.7*W2 - 0.1*t, sd = 1)
+
+# Exposures at t = 1,2,3 (continuous here; switch to rbern with plogis if you want binary)
+D <- D +
+  node("A", t = 1:tau, distr = "rnorm",
+       mean = # 0.6*L1[t] - 0.4*L2[t] + 
+         0.4*W1 + 0.2*W2,
+       sd = 1)
+
+# Outcome depends on last-time covariates and all A's (feel free to change)
+D <- D +
+  node("Y", distr = "rnorm",
+       mean =  # 0.7*L1[3] - 0.5*L2[3] + 
+         0.4*A[1] + 0.3*A[2] + 0.3*W1 + 0.1*W2,
+       sd = 1, t = tau+1)
+
+# Finalize and simulate
+Dset <- set.DAG(D)
+raw <- sim(Dset, n = n)
+
+# ---- Post-process to your exact column names ----
+df <- raw %>%
+  transmute(
+    id = seq_len(n),
+    W1 = W1, W2 = W2,
+    L11 = L1_1, L12 = L2_1,
+    L21 = L1_2, L22 = L2_2,
+    A1  = A_1,  A2  = A_2, 
+    Y = Y_3
+  )
+
+# Quick sanity check: structure & a peek
+str(df)
+dplyr::as_tibble(df, .name_repair = "minimal") |> dplyr::glimpse()
+
+
+
+# put df into an LMTP data struct
+ds <- LMTP_Data_Struct2$new(
+  data = df, id_col = "id", n_timesteps = 2,
+  A_cols = c("A1","A2"),
+  L_cols = list(c("L11","L12"), c("L21","L22")),
+  W_cols = c("W1","W2"),
+  Y_col = "Y"
+)
+
+
+# define a sequence of policies 
+shift_mtp <- mtp_additive_shift(delta = -.05)
+
+policy_seq <- repeat_policy_over_time(shift_mtp, 3)
+
+Q_trainer <- LMTPQTrainer$new(
+  learners_Q = list(nadir::lnr_lm, nadir::lnr_lm)
+)
+
+
+# fit a new outcome regression using pseudo-outcomes
+model2 <- Q_trainer$train_Q_t(ds, t = 2, pseudo_outcome_vec = ds$Y())
+
+# predictions for Y given A(2), H(2)
+A2_star <- policy_seq$apply_policy_t(2, ds$A(2), ds$H(2))
+pseudo_out_2 <- model2(A2_star, ds$H(2))
+
+# fit another outcome regression using pseudo-outcomes
+model1 <- Q_trainer$train_Q_t(ds, t = 1, pseudo_outcome_vec = pseudo_out_2)
+
+A1star <- policy_seq$apply_policy_t(1, ds$A(1), ds$H(1))
+pseudo_out_1_star <- model1(A1star, ds$H(1))
+
+mean(pseudo_out_1_star - ds$Y())
+```
+
+IPW Approach
+
+```{r}
+
+ipw_nuis <- LMTPNuisanceFactory$new(
+  learners_g = nadir::lnr_lm_density,
+  A_type = 'continuous',
+  policy_seq = policy_seq,
+  repeat_fmls_lnrs_args = TRUE)
+
+nuis_trained <- ipw_nuis$train(ds)
+r_list <- nuis_trained$r
+
+Kprov <- LMTPKProvider$new(
+  r_list = r_list, ds = ds)
+
+weights <- Kprov$K_obs(t=2)
+
+mean(ds$Y() * weights - ds$Y())
+
+```

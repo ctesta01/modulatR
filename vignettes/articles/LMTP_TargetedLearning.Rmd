@@ -16,7 +16,7 @@ library(TargetedLearning)
 library(dplyr)
 
 # n: sample size
-n <- 500
+n <- 2000
 
 # ---- DAG specification in simcausal ----
 D <- DAG.empty()
@@ -37,13 +37,15 @@ D <- D +
 # Exposures at t = 1,2,3 (continuous here; switch to rbern with plogis if you want binary)
 D <- D +
   node("A", t = 1:3, distr = "rnorm",
-       mean =  0.6*L1[t] - 0.4*L2[t] + 0.4*W1 + 0.2*W2,
+       mean =  # 0.6*L1[t] - 0.4*L2[t] + 
+         0.4*W1 + 0.2*W2,
        sd = 1)
 
 # Outcome depends on last-time covariates and all A's (feel free to change)
 D <- D +
   node("Y", distr = "rnorm",
-       mean =  0.7*L1[3] - 0.5*L2[3] + 0.4*A[1] + 0.3*A[2] + 0.2*A[3] + 0.3*W1 + 0.1*W2,
+       mean =  # 0.7*L1[3] - 0.5*L2[3] + 
+         0.4*A[1] + 0.3*A[2] + 0.2*A[3] + 0.3*W1 + 0.1*W2,
        sd = 1, t = 4)
 
 # Finalize and simulate
@@ -62,14 +64,8 @@ df <- raw %>%
     Y = Y_4
   )
 
-# Quick sanity check: structure & a peek
-str(df)
-dplyr::as_tibble(df, .name_repair = "minimal") |> dplyr::glimpse()
-
-
-
 # put df into an LMTP data struct
-ds <- LMTP_Data_Struct2$new(
+ds <- LMTP_Data_Struct$new(
   data = df, id_col = "id", n_timesteps = 3,
   A_cols = c("A1","A2","A3"),
   L_cols = list(c("L11","L12"), c("L21","L22"), c("L31","L32")),
@@ -80,7 +76,6 @@ ds <- LMTP_Data_Struct2$new(
 
 # define a sequence of policies 
 shift_mtp <- mtp_additive_shift(delta = -.05)
-
 policy_seq <- repeat_policy_over_time(shift_mtp, 3)
 
 # set up the nuisance factories
@@ -95,26 +90,43 @@ policy_seq <- repeat_policy_over_time(shift_mtp, 3)
 # )
 
 # simpler  models
-nuis <- LMTPNuisanceFactory$new(
+nuis1 <- LMTPNuisanceFactory$new(
   # learners_Q = list(nadir::lnr_lm, nadir::lnr_rf, nadir::lnr_xgboost),
   learners_g = nadir::lnr_lm_density,
   policy_seq = policy_seq,
   A_type = "continuous",
-  repeat_fmls_lnrs_args = TRUE
+  repeat_fmls_lnrs_args = TRUE,
+  g_mode = 'density'
 )
+
+# if using the ratio classification trick, then make sure to use 
+# nadir::lnr_logistic or similarwith g_mode = 'ratio_classification'
+# simpler  models
+nuis2 <- LMTPNuisanceFactory$new(
+  # learners_Q = list(nadir::lnr_lm, nadir::lnr_rf, nadir::lnr_xgboost),
+  # learners_g = nadir::lnr_lm_density,
+  learners_g = list(nadir::lnr_logistic, nadir::lnr_rf_binary),
+  policy_seq = policy_seq,
+  A_type = "continuous",
+  repeat_fmls_lnrs_args = TRUE,
+  g_mode = 'ratio_classification'
+) 
+options(future.globals.maxSize = Inf) # if using lnr_rf_binary
+
 
 
 fit <- fit_tmle_for_LMTP(
   ds,
   policy_seq = policy_seq,
   learners_Q = nadir::lnr_lm,
-  learners_g_factory = nuis,
+  learners_g_factory = nuis2,
   outcome_link = 'identity',
-  repeat_lnrs = TRUE)
+  repeat_lnrs = TRUE,
+  method = 'tmle')
 
 
 fit$psi; fit$ci95
-
+fit$se
 
 
 identity_mtp <- mtp_additive_shift(delta = 0)
@@ -141,6 +153,7 @@ fit <- fit_tmle_for_LMTP(
 
 
 fit$psi; fit$ci95
+fit$se
 ```
 
 
@@ -148,8 +161,37 @@ Let's try to just do outcome regression by itself on our own.
 
 ```{r}
 Q_trainer <- LMTPQTrainer$new(
-  learners_Q = nadir::lnr_lm
+  learners_Q = list(nadir::lnr_lm, nadir::lnr_lm, nadir::lnr_lm)
 )
 
-Q_trainer(ds, t = 3, ds$Y()
+model3 <- Q_trainer$train_Q_t(ds, t = 3, pseudo_outcome_vec = ds$Y())
+
+# predictions for Y given A(3), H(3)
+pseudo_out_3 <- model3(ds$A(3), ds$H(3))
+
+# fit a new outcome regression using pseudo-outcomes
+model2 <- Q_trainer$train_Q_t(ds, t = 2, pseudo_outcome_vec = pseudo_out_3)
+
+# predictions for Y given A(2), H(2)
+pseudo_out_2 <- model2(ds$A(2), ds$H(2))
+
+# fit another outcome regression using pseudo-outcomes
+model1 <- Q_trainer$train_Q_t(ds, t = 1, pseudo_outcome_vec = pseudo_out_2)
+
+pseudo_out_1 <- model1(ds$A(1), ds$H(1))
+A1star <- policy_seq$apply_policy_t(1, ds$A(1), ds$H(1))
+pseudo_out_1_star <- model1(A1star, ds$H(1))
+
+mean(pseudo_out_1_star)
+mean(pseudo_out_1)
+
+mean(pseudo_out_1_star - pseudo_out_1)
+
+
+
+# try with lm
+model3lm <- lm(Y ~ ., data = {df |> select(-id)})
+pseudo_out_3_lm <- predict(model3lm)
+summary(pseudo_out_3_lm - pseudo_out_3)
+
 ```

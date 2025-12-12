@@ -78,7 +78,7 @@ MTP <- R6::R6Class("MTP",
       vapply(seq_along(A), function(i) {
         self$piece_index_for_natural(A[i], L[i, , drop = FALSE]) },
         integer(1)
-        )
+      )
     },
 
     # ---- Forward application d_j(A,L) -> A_star (vectorized)

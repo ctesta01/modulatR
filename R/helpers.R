@@ -1,3 +1,30 @@
+#' Internal utility: replicate a list or object over time
+#'
+#' Helper used throughout the LMTP implementation to expand a single
+#' specification (e.g., a learner list or formula) to a list of length
+#' `tau`, when `repeat_bool = TRUE`. If `repeat_bool = FALSE`, the input
+#' must already be a list of length `tau`.
+#'
+#' @param x An object or list to be replicated.
+#' @param tau Integer number of time points.
+#' @param repeat_bool Logical; if `TRUE`, replicate `x` `tau` times; if
+#'   `FALSE`, check that `x` is already a list of length `tau`.
+#'
+#' @return A list of length `tau`.
+.rep_if_needed <- function(x, tau, repeat_bool) {
+
+  if (repeat_bool) {
+    x <- rep(list(x), tau)
+  } else {
+    if (length(x) != tau || !is.list(x)) {
+      stop("formulas, learner lists, and learner arguments must be length tau if not using repeat_fmls_lnrs_and_args")
+    }
+  }
+  return(x)
+}
+
+
+
 #' Check whether \code{x} is in the interval given
 #'
 #' `%btn%` stands for "between" and it tests whether `x` is between

@@ -1,3 +1,16 @@
+## Slated for Deprecation
+##
+## Not clear why this seems to produce different results from what's in the next
+## file XX_simulate_LMTP_and_get_truth.R simulate_lmtp_data_under_counterfactual_policy()
+##
+## The problem:
+##
+## If one uses either to run the baseline simulation with no intervention, and
+## then calculates mean(Y) at the end, one gets different results.  Downstream
+## of that, one gets different results applying the LMTP methods to the data to
+## estimate counterfactual means.
+
+
 library(simcausal)
 
 simulate_lmtp_data_with_simcausal <- function(n, t_max = 3L) {

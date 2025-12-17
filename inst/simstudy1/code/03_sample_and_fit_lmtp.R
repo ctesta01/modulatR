@@ -8,8 +8,9 @@ set.seed(task_i) # this way every task in the job-array has a different seed
 results <- list() # data struct to store results
 
 for (j in 1:length(sims_for_task_i)) {
+  tryCatch({
   # get sample size for jth simulation in task_i
-  sample_n <- sims_for_task_i[[j]]
+  sample_n <- n_vals_per_sim[sims_for_task_i[[j]]]
 
   # create data structure
   ds <- simulate_lmtp_data_under_counterfactual_policy(
@@ -56,12 +57,19 @@ for (j in 1:length(sims_for_task_i)) {
   identity_mtp <- mtp_additive_shift(delta = 0)
   policy_seq_identity <- repeat_policy_over_time(identity_mtp, 3)
 
+  nuis_nat <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_lm_density,
+    policy_seq = policy_seq_identity,
+    A_type = "continuous",
+    repeat_fmls_lnrs_args = TRUE
+  )
+
   # fit the model under no intervention for E[Y]
   fit_natural <- fit_tmle_for_LMTP(
     ds,
     policy_seq = policy_seq_identity,
     learners_Q = nadir::lnr_lm,
-    learners_g_factory = nuis,
+    learners_g_factory = nuis_nat,
     outcome_link = 'identity',
     repeat_lnrs = TRUE)
 
@@ -74,9 +82,22 @@ for (j in 1:length(sims_for_task_i)) {
     nat_ci_low = fit_natural$ci95[1],
     nat_ci_high = fit_natural$ci95[2],
     diff_psi = fit_intv$psi - fit_natural$psi,
-    diff_ci_low = quantile(fit_intv$ic - fit_natural$ic, 0.025, na.rm=TRUE),
-    diff_ci_high = quantile(fit_intv$ic - fit_natural$ic, 0.975, na.rm=TRUE)
-  )
+    diff_ci_low = (fit_intv$psi - fit_natural$psi) + qnorm(0.025)*sqrt(var(fit_intv$ic - fit_natural$ic)/sample_n),
+    diff_ci_high = (fit_intv$psi - fit_natural$psi) + qnorm(0.975)*sqrt(var(fit_intv$ic - fit_natural$ic)/sample_n)
+  )},
+  error = function(e) {
+    results[[j]] <- list(
+      intv_psi = NA,
+      nat_psi = NA,
+      intv_ci_low = NA,
+      intv_ci_high = NA,
+      nat_ci_low = NA,
+      nat_ci_high = NA,
+      diff_psi = NA,
+      diff_ci_low = NA,
+      diff_ci_high = NA
+    )
+  })
 }
 
 # write the results to file

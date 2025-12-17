@@ -13,7 +13,7 @@ dir.create(here(prefix_dir, str_c(results_str, "/agg")), showWarnings = FALSE)
 dir.create(here(prefix_dir, str_c(results_str, "/sbatch-out")), showWarnings = FALSE)
 
 # --- configuration ---
-n_vals <- c(100, 300, 500, 1000)
+n_vals <- c(100, 300, 500, 1000, 10000)
 n_reps_total <- 1000   # total repetitions per n
 delta <- -0.05         # policy shift in your example
 sd_for_noise <- 10     # for specifying the noise level in simulations

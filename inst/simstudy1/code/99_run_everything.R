@@ -1,7 +1,8 @@
 
 # simulation details are passed in sbatch_99_run_everything.sh
-commandLineArgs <- commandArgs()
+commandLineArgs <- commandArgs(trailingOnly=TRUE)
 task_i <- commandLineArgs[1]
+task_i <- as.integer(task_i)
 
 library(here)
 

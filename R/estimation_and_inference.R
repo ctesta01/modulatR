@@ -111,11 +111,14 @@ fit_tmle_for_LMTP <- function(
       Qvec <- Q0_t(ds$A(t), Ht)
 
       if (method == "tmle") {
-        up <- fluct$fit_update(Q0_fun_t = Q0_t,
-                               Qvec = Qvec,
-                               target_vec = target_vec,
-                               K_obs_t = K_obs_t,
-                               Kprov = Kprov, t = t)
+        up <- fluct$fit_update(
+          Q0_fun_t = Q0_t,
+          Qvec = Qvec,
+          target_vec = target_vec,
+          K_obs_t = K_obs_t,
+          Kprov = Kprov,
+          t = t)
+
         eps <- up$epsilon
         Q_star[[t]] <- up$wrap
       } else {

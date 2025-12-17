@@ -1,4 +1,9 @@
 library(here)
+library(stringr)
+library(lubridate)
+library(dplyr)
+devtools::load_all(".")
+
 prefix_dir <- here("inst/simstudy1")
 date_str <- lubridate::today()
 results_str <- str_c("results-", date_str)

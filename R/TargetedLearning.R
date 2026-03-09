@@ -1,7 +1,7 @@
 # Targeted Learning for an MTP
 
 # --- One-timepoint MTP TargetParameter ----
-MTPParameter <- R6::R6Class("MTPParameter", inherit = TargetParameter,
+MTPParameter <- R6::R6Class("MTPParameter", inherit = TargetedLearning::Parameter,
   public = list(
     mtp = NULL,               # instance of your MTP class (piecewise invertible)
     A_type = NULL,            # "continuous" or "discrete"
@@ -212,7 +212,7 @@ fit_tmle_for_MTP <- function(data, bounds = NULL, maxit = 3, eps_tol = 1e-5) {
 
 LogisticFluctuationMTP <- R6::R6Class(
   "LogisticFluctuationMTP",
-  inherit = FluctuationSubmodel,
+  inherit = TargetedLearning::FluctuationSubmodel,
   public = list(
     mtp = NULL,
     truncation_alpha = 1e-6,
@@ -283,7 +283,7 @@ LogisticFluctuationMTP <- R6::R6Class(
 
 IdentityFluctuationMTP <- R6::R6Class(
   "IdentityFluctuationMTP",
-  inherit = FluctuationSubmodel,
+  inherit = TargetedLearning::FluctuationSubmodel,
   public = list(
     mtp = NULL,
     initialize = function(mtp) {

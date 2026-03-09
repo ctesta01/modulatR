@@ -142,7 +142,7 @@ MTP <- R6::R6Class("MTP",
         # contributions <- dplyr::bind_cols(contributions, L_repeated)
         return(contributions)
       })
-      contributions <- bind_rows(contributions)
+      contributions <- dplyr::bind_rows(contributions)
 
       # print(colnames(L))
       # print(colnames(contributions))
@@ -180,6 +180,7 @@ MTP <- R6::R6Class("MTP",
 #'
 #' d(A,L) = A + delta  if lower(L) <= A + delta <= upper(L), else A
 #' Inverse branches for a* are: a* - delta (shift piece), a* (identity piece).
+#' @export
 mtp_additive_shift <- function(delta,
                                lower = -Inf,
                                upper =  Inf) {

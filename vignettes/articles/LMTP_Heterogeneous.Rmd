@@ -109,7 +109,7 @@ nuis_ratio <- LMTPNuisanceFactory$new(
 options(future.globals.maxSize = Inf) # if using lnr_rf_binary
 
 # ---- Marginal LMTP fit (optional sanity check) ----
-fit_marg <- fit_tmle_for_LMTP(
+run_marg <- run_tmle_for_LMTP(
   ds,
   policy_seq = policy_seq,
   learners_Q = nadir::lnr_lm,
@@ -119,13 +119,13 @@ fit_marg <- fit_tmle_for_LMTP(
   method = "tmle"
 )
 
-fit_marg$psi
-fit_marg$ci95
-fit_marg$se
+run_marg$psi
+run_marg$ci95
+run_marg$se
 
 # ---- Heterogeneous LMTP effects by V ----
 # V is a subset of W_cols (here just "V"), so we pass V = "V"
-fit_het <- fit_lmtp_heterogeneous(
+run_het <- run_lmtp_heterogeneous(
   ds,
   policy_seq = policy_seq,
   learners_Q = nadir::lnr_lm,
@@ -137,9 +137,9 @@ fit_het <- fit_lmtp_heterogeneous(
   stabilization = "naive"
 )
 
-fit_het$theta      # E[Y^d | V=1] and E[Y^d | V=2]
-fit_het$ci95
-fit_het$se
-fit_het$p_v       # empirical subgroup proportions
+run_het$theta      # E[Y^d | V=1] and E[Y^d | V=2]
+run_het$ci95
+run_het$se
+run_het$p_v       # empirical subgroup proportions
 
 ```

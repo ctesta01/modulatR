@@ -42,7 +42,7 @@
 #'   * `Kprov`: the K-provider used.
 #'
 #' @export
-fit_tmle_for_LMTP <- function(
+run_tmle_for_LMTP <- function(
     ds,
     policy_seq,
     learners_Q,
@@ -242,7 +242,7 @@ fit_tmle_for_LMTP <- function(
 #'     subgroups.
 #'
 #' @export
-fit_lmtp_heterogeneous <- function(
+run_lmtp_heterogeneous <- function(
     ds,
     policy_seq,
     learners_Q,

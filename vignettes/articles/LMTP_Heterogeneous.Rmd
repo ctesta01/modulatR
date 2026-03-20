@@ -108,7 +108,7 @@ nuis_ratio <- LMTPNuisanceFactory$new(
 )
 options(future.globals.maxSize = Inf) # if using lnr_rf_binary
 
-# ---- Marginal LMTP fit (optional sanity check) ----
+# ---- Marginal LMTP fit ----
 run_marg <- run_tmle_for_LMTP(
   ds,
   policy_seq = policy_seq,
@@ -141,5 +141,4 @@ run_het$theta      # E[Y^d | V=1] and E[Y^d | V=2]
 run_het$ci95
 run_het$se
 run_het$p_v       # empirical subgroup proportions
-
 ```

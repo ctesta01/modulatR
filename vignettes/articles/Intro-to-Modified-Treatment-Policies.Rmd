@@ -1,0 +1,148 @@
+---
+title: "Intro to Modified Treatment Policies"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Overview
+
+The `{modulatR}` package represents a longitudinal modified treatment policy
+(LMTP) as a sequence of single-time modified treatment policies (MTPs), one
+for each treatment time point. The key idea is that a single-time policy acts
+on the treatment at one time point given the history available at that time.
+
+An MTP object is therefore a single-time transformation object. It contains
+the map from an observed treatment value $A_t$ to a shifted value $A_t^d$,
+and, how to compute the induced post-policy density
+$g_t^d(a_t | h_t)$ from the observed conditional density $g_t(a_t | h_t)$
+using the transformation of variables formula.
+
+A `LMTPPolicySequence` simply stores one such object per time point.
+
+This vignette focuses on just the single timepoint policy objects themselves
+rather than their longitudinal versions in `LMTPPolicySequence`.
+
+### A simple continuous modified treatment policy
+
+```{r setup}
+library(modulatR)
+```
+
+We start with a single-time continuous treatment A having a lognormal
+distribution. Consider the policy
+
+$$
+d(A, L) = \begin{cases}
+a - 5, & a \geq 5, 
+a, & a < 5.
+\end{cases}
+$$
+
+This is a useful example because:
+
+  - it is easy to visualize;
+  - it is piecewise invertible;
+  - we will use it to show how an MTP can alter a distribution without being a
+static intervention.
+
+Below we simulate from a lognormal treatment distribution and then define this
+policy as a two-region MTP.
+
+```{r}
+library(ggplot2)
+
+set.seed(2026)
+
+n <- 5000
+L <- data.frame(L1 = rnorm(n))
+A <- rlnorm(n, meanlog = 1.6, sdlog = 0.45)
+
+mtp_shift_down_5 <- MTP$new(
+  treatment_type = "continuous",
+  region_predicates = list(
+    function(A, H) A >= 5,
+    function(A, H) A < 5
+  ),
+  policy_pieces = list(
+    function(A, H) A - 5,
+    function(A, H) A
+  ),
+  inverse_map_pieces = list(
+    function(A_star, H) A_star + 5,
+    function(A_star, H) A_star
+  ),
+  inverse_deriv_pieces = list(
+    function(A_star, H) rep(1, length(A_star)),
+    function(A_star, H) rep(1, length(A_star))
+  ),
+  name = "shift_down_5_if_A_ge_5"
+)
+
+mtp_shift_down_5
+
+A_star <- mtp_shift_down_5$apply_policy(A, L)
+```
+
+Applying the policy directly:
+
+```{r}
+head(data.frame(
+  A = round(A[1:6], 2),
+  A_star = round(A_star[1:6], 2)
+))
+```
+
+### Visualizing the transformation 
+
+
+```{r}
+dist_df <- rbind(
+  data.frame(value = A, which = "Observed A"),
+  data.frame(value = A_star, which = "Shifted A*")
+)
+
+ggplot(dist_df, aes(x = value)) +
+  geom_histogram(bins = 60) +
+  facet_wrap(~ which, ncol = 1, scales = "free_y") +
+  labs(
+    title = "Observed and post-policy treatment distributions",
+    x = "Treatment value",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+g_density <- function(A_vec, H_df) {
+  dlnorm(A_vec, meanlog = 1.6, sdlog = 1.1)
+}
+
+grid <- seq(0.001, 30, length.out = 500)
+
+gd_grid <- mtp_shift_down_5$gd_from_density(
+  A_vec = grid,
+  H_df = data.frame(L1 = rep(0, length(grid))),
+  density_fun = g_density
+)
+
+density_df <- rbind(
+  data.frame(x = grid, density = g_density(grid, data.frame(L1 = 0)), which = "Observed g"),
+  data.frame(x = grid, density = gd_grid, which = "Post-policy g^d")
+)
+
+ggplot(density_df, aes(x = x, y = density, linetype = which, group = which)) +
+  geom_line() +
+  labs(
+    title = "Observed density and post-policy density",
+    x = "Treatment value",
+    y = "Density"
+  ) +
+  scale_linetype_manual(values = c('dashed', 'solid')) + 
+  theme_minimal()
+```

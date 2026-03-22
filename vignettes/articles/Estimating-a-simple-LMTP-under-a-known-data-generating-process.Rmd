@@ -1,0 +1,159 @@
+---
+title: "Estimating a simple LMTP under a known data-generating process"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimating a simple LMTP under a known data-generating process}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+set.seed(2025)
+library(modulatR)
+library(TargetedLearning)
+```
+
+# Generate the dataset
+
+```{r}
+# to determine truth: 
+n <- 1e6
+W <- rnorm(n)
+eL1 <- rnorm(n)
+eA1 <- rnorm(n)
+eL2 <- rnorm(n)
+eA2 <- rnorm(n)
+eY  <- rnorm(n)
+
+L1 <- 0.5 * W + eL1
+A1 <- 0.6 * W + 0.8 * L1 + eA1
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + eL2
+A2 <- 0.3 * W + 0.5 * L2 + eA2
+Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + eY
+
+A1d <- A1 + 1
+L2d <- 0.4 * W + 0.7 * A1d + 0.6 * L1 + eL2
+A2d <- (0.3 * W + 0.5 * L2d + eA2) + 1
+Yd  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2d + 1.2 * A1d + 0.8 * A2d + eY
+
+truth_EY <- mean(Y)
+truth_EYd <- mean(Yd)
+truth_diff <- mean(Yd - Y)
+
+c(EY = truth_EY, EYd = truth_EYd, diff = truth_diff)
+
+# now for the DGP 
+n <- 8000
+
+W <- rnorm(n)
+L1 <- 0.5 * W + rnorm(n)
+A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+
+Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+df <- data.frame(
+  W = W,
+  L1 = L1,
+  A1 = A1,
+  L2 = L2,
+  A2 = A2,
+  Y = Y
+)
+
+
+# set up the data
+ds <- LMTPData$new(
+  data = df,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+
+# define the LMTP 
+pol <- mtp_additive_shift(delta = 1)
+policy_seq <- repeat_policy_over_time(pol, tau = ds$tau())
+
+policy_seq
+
+# also define the identity 
+identity_seq <- identity_policy(
+  A_type = "continuous",
+  tau = ds$tau()
+)
+
+identity_seq
+
+# set up nuisance estimation 
+nf_shift <- LMTPNuisanceFactory$new(
+  learners_g = nadir::lnr_glm_density,
+  policy_seq = policy_seq,
+  A_type = "continuous",
+  g_mode = "density"
+)
+
+nf_identity <- LMTPNuisanceFactory$new(
+  learners_g = nadir::lnr_glm_density,
+  policy_seq = identity_seq,
+  A_type = "continuous",
+  g_mode = "density"
+)
+
+fluct <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian()
+)
+
+# perform two TMLE tasks, one for E[Y^d] and one for E[Y]
+task_shift <- make_lmtp_tl_task(
+  ds = ds,
+  policy_seq = policy_seq,
+  nuisance_factory = nf_shift,
+  fluctuation = fluct,
+  learners_Q = nadir::lnr_glm
+)
+
+task_identity <- make_lmtp_tl_task(
+  ds = ds,
+  policy_seq = identity_seq,
+  nuisance_factory = nf_identity,
+  fluctuation = fluct,
+  learners_Q = nadir::lnr_glm
+)
+
+fit_shift <- task_shift$run()
+fit_identity <- task_identity$run()
+
+print(fit_shift)
+print(fit_identity)
+
+# calculate difference and compare to truth 
+fit_diff <- lmtp_delta_contrast(
+  fit1 = fit_shift,
+  fit0 = fit_identity,
+  transform = "difference"
+)
+
+comparison <- data.frame(
+  parameter = c("E[Y]", "E[Y^d]", "E[Y^d] - E[Y]"),
+  truth = c(truth_EY, truth_EYd, truth_diff),
+  estimate = c(fit_identity$estimate, fit_shift$estimate, fit_diff$estimate),
+  se = c(fit_identity$se, fit_shift$se, fit_diff$se)
+)
+
+comparison
+
+print(fit_diff)
+```
+
+
+

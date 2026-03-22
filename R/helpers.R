@@ -23,92 +23,69 @@
   return(x)
 }
 
+#' Use first argument if not null, else use second argument
+`%||%` <- function(x, y) {
+  if (is.null(x)) y else x
+}
 
 
-#' Check whether \code{x} is in the interval given
-#'
-#' `%btn%` stands for "between" and it tests whether `x` is between
-#' `interval[1]` and `interval[2]`.
-#'
-#' The default behavior is to test if
-#' `x %in% [ interval[1], interval[2] )`, but
-#' to get other comparisons one can call `%btn%` without
-#' using infix notation and use the `inclusivity` argument.
-#'
-#' @examples
-#' 5 %btn% c(0, 10)
-#' c(0.5, 1.5) %btn% c(0, 1)
-#' `%btn%`(c(0.5, 1), c(0, 1), inclusivity = "[]")
-#'
-#' @param x A numeric vector of values to test against the interval.
-#' @param interval An vector of two values defining an upper and lower limit.
-#' @param inclusivity One of "[]", "()", "[)" or "(]" which are short-hand
-#' respectively for inclusive, exclusive, left-inclusive and right-exclusive, and
-#' left-exclusive and right-inclusive.
-#'
+.wald_ci <- function(est, se, alpha = 0.05) {
+  z <- stats::qnorm(1 - alpha / 2)
+  c(lower = est - z * se, upper = est + z * se)
+}
+
 #' @export
-`%btn%` <- function(x, interval, inclusivity = "[)") {
-  if (! is.numeric(interval) || length(interval) != 2) {
-    stop("The interval passed to %btn% must be a length 2 numeric vector.")
+identity_policy <- function(A_type = c("continuous", "discrete"),
+                             discrete_support = NULL,
+                             tau = 1L) {
+  A_type <- match.arg(A_type)
+
+  if (A_type == "continuous") {
+    mtp_id <- MTP$new(
+      treatment_type = "continuous",
+      region_predicates = list(function(A, H) rep(TRUE, length(A))),
+      policy_pieces = list(function(A, H) A),
+      inverse_map_pieces = list(function(A_star, H) A_star),
+      inverse_deriv_pieces = list(function(A_star, H) rep(1, length(A_star))),
+      name = "identity"
+    )
+  } else {
+    mtp_id <- mtp_discrete(
+      map_fun = function(A, H) A,
+      support = discrete_support,
+      name = "identity"
+    )
   }
 
-  if (! is.numeric(x)) {
-    stop("The left-hand-side passed to %btn% must be a numeric vector.")
+  repeat_policy_over_time(mtp_id, tau = tau, name = "identity_sequence")
+}
+
+.make_subgroup_matrix <- function(ds, subgroup_funs) {
+  if (is.function(subgroup_funs)) {
+    subgroup_funs <- list(group = subgroup_funs)
   }
-
-  return(switch(
-    inclusivity,
-    "()" = x > interval[1] & x < interval[2],
-    "[]" = x >= interval[1] & x <= interval[2],
-    "[)" = x >= interval[1] & x < interval[2],
-    "[)" = x > interval[1] & x <= interval[2]
-  ))
-}
-
-#' Inclusive Between
-#' @inheritParams %btn%
-#' @export
-`%btn[]%` <- function(x, interval) {
-  `%btn%`(x, interval, inclusivity = "[]")
-}
-
-#' Exclusive Between
-#' @inheritParams %btn%
-#' @export
-`%btn()%` <- function(x, interval) {
-  `%btn%`(x, interval, inclusivity = "()")
-}
-
-#' Left-Exclusive Right-Inclusive Between
-#' @inheritParams %btn%
-#' @export
-`%btn(]%` <- function(x, interval) {
-  `%btn%`(x, interval, inclusivity = "(]")
-}
-
-#' Left-Inclusive Right-Exclusive Between
-#' @inheritParams %btn%
-#' @export
-`%btn[)%` <- function(x, interval) {
-  `%btn%`(x, interval, inclusivity = "[)")
-}
-
-#' Root-Mean Squared Error
-#'
-#' @param x A numeric vector to take the square, then mean, and then
-#' square-root of.
-#'
-rmse <- function(x) {
-  if (! is.numeric(x) || ! is.vector(x)) {
-    stop("Argument x to rmse is not a numeric vector.")
+  if (!is.list(subgroup_funs) || !all(vapply(subgroup_funs, is.function, logical(1)))) {
+    stop("`subgroup_funs` must be a function or named list of functions.")
   }
-  return(sqrt(mean(x^2)))
+  out <- lapply(subgroup_funs, function(f) as.numeric(f(ds$df)))
+  out <- as.data.frame(out, check.names = FALSE)
+  if (is.null(names(out))) {
+    names(out) <- paste0("group", seq_len(ncol(out)))
+  }
+  out
 }
 
-mse <- function(x) {
-  if (! is.numeric(x) || ! is.vector(x)) {
-    stop("Argument x to rmse is not a numeric vector.")
+.make_scalar_H_fun <- function(k_provider, t) {
+  function(A_vec, H_df) {
+    # current scalar path only uses observed-data K_obs(t)
+    # returned as a constant-in-evaluation-point function for the observed update
+    k_provider$K_obs(t)
   }
-  return(mean(x^2))
+}
+
+.make_subgroup_H_obs <- function(k_provider, subgroup_mat, t) {
+  pA <- colMeans(subgroup_mat)
+  pA <- pmax(pA, 1e-8)
+  sweep(subgroup_mat, 2, pA, "/") * k_provider$K_obs(t)
 }
 

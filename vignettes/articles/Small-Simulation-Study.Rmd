@@ -1,0 +1,507 @@
+---
+title: "Small Simulation Study"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(modulatR)
+library(TargetedLearning)
+```
+
+
+## A small simulation study
+
+To check that the pipeline is behaving sensibly, we run a small simulation study
+for the contrast
+
+\[
+E[Y^d] - E[Y].
+\]
+
+For the DGP in this vignette, the true contrast is 2.49.
+
+```{r}
+# to determine truth: 
+n <- 1e6
+W <- rnorm(n)
+eL1 <- rnorm(n)
+eA1 <- rnorm(n)
+eL2 <- rnorm(n)
+eA2 <- rnorm(n)
+eY  <- rnorm(n)
+
+L1 <- 0.5 * W + eL1
+A1 <- 0.6 * W + 0.8 * L1 + eA1
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + eL2
+A2 <- 0.3 * W + 0.5 * L2 + eA2
+Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + eY
+
+A1d <- A1 + 1
+L2d <- 0.4 * W + 0.7 * A1d + 0.6 * L1 + eL2
+A2d <- (0.3 * W + 0.5 * L2d + eA2) + 1
+Yd  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2d + 1.2 * A1d + 0.8 * A2d + eY
+
+truth_EY <- mean(Y)
+truth_EYd <- mean(Yd)
+truth_diff <- mean(Yd - Y)
+
+c(EY = truth_EY, EYd = truth_EYd, diff = truth_diff)
+```
+
+
+```{r}
+one_rep <- function(n = 2000, delta = 1) {
+  W <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  df <- data.frame(
+    W = W,
+    L1 = L1,
+    A1 = A1,
+    L2 = L2,
+    A2 = A2,
+    Y = Y
+  )
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  policy_seq <- repeat_policy_over_time(
+    mtp_additive_shift(delta = delta),
+    tau = ds$tau()
+  )
+
+  identity_seq <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+  nf_shift <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = policy_seq,
+    A_type = "continuous",
+    g_mode = "density"
+  )
+
+  nf_identity <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = identity_seq,
+    A_type = "continuous",
+    g_mode = "density"
+  )
+
+  fluct <- LMTPFluctuationSubmodel$new(
+    family = stats::gaussian()
+  )
+
+  fit_shift <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = policy_seq,
+    nuisance_factory = nf_shift,
+    fluctuation = fluct,
+    learners_Q = stats::glm
+  )$run()
+
+  fit_identity <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = identity_seq,
+    nuisance_factory = nf_identity,
+    fluctuation = fluct,
+    learners_Q = stats::glm
+  )$run()
+
+  fit_diff <- lmtp_delta_contrast(
+    fit1 = fit_shift,
+    fit0 = fit_identity,
+    transform = "difference"
+  )
+
+  c(
+    estimate = fit_diff$estimate,
+    se = fit_diff$se,
+    lower = fit_diff$ci["lower"],
+    upper = fit_diff$ci["upper"],
+    covered = as.numeric(
+      fit_diff$ci["lower"] <= truth_diff && truth_diff <= fit_diff$ci["upper"]
+    )
+  )
+}
+```
+
+```{r}
+B <- 300
+sim_res <- suppressMessages(replicate(B, one_rep(n = 20, delta = 1)))
+sim_res <- t(sim_res)
+sim_res <- as.data.frame(sim_res)
+
+summary_df <- data.frame(
+  quantity = c("Monte Carlo mean", "Empirical SD", "Mean estimated SE", "Coverage"),
+  value = c(
+    mean(sim_res$estimate),
+    stats::sd(sim_res$estimate),
+    mean(sim_res$se),
+    mean(sim_res$covered)
+  )
+)
+
+summary_df
+```
+
+```{r}
+B <- 300
+sim_res <- suppressMessages(replicate(B, one_rep(n = 100, delta = 1)))
+sim_res <- t(sim_res)
+sim_res <- as.data.frame(sim_res)
+
+summary_df <- data.frame(
+  quantity = c("Monte Carlo mean", "Empirical SD", "Mean estimated SE", "Coverage"),
+  value = c(
+    mean(sim_res$estimate),
+    stats::sd(sim_res$estimate),
+    mean(sim_res$se),
+    mean(sim_res$covered)
+  )
+)
+
+summary_df
+```
+
+```{r}
+B <- 300
+sim_res <- suppressMessages(replicate(B, one_rep(n = 200, delta = 1)))
+sim_res <- t(sim_res)
+sim_res <- as.data.frame(sim_res)
+
+summary_df <- data.frame(
+  quantity = c("Monte Carlo mean", "Empirical SD", "Mean estimated SE", "Coverage"),
+  value = c(
+    mean(sim_res$estimate),
+    stats::sd(sim_res$estimate),
+    mean(sim_res$se),
+    mean(sim_res$covered)
+  )
+)
+
+summary_df
+```
+
+```{r}
+# data.frame(
+#   truth = truth_diff,
+#   mc_mean = mean(sim_res$estimate),
+#   bias = mean(sim_res$estimate) - truth_diff,
+#   empirical_sd = stats::sd(sim_res$estimate),
+#   mean_estimated_se = mean(sim_res$se),
+#   coverage_95 = mean(sim_res$covered)
+# )
+```
+
+
+## Using small super learners with `{nadir}`
+
+The previous section used simple GLMs for the outcome regressions and a Gaussian
+density learner for the treatment mechanism. In this section, we use small
+Super Learners built with `{nadir}`.
+
+For illustration, we use the learner library
+
+- `nadir::lnr_glm`
+- `nadir::lnr_earth`
+- `nadir::lnr_ranger`
+
+for the outcome regressions, and a small density-learning library for the
+continuous treatment mechanism.
+
+```{r}
+library(nadir)
+
+make_example_objects <- function(n = 2000, delta = 1) {
+  W <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  df <- data.frame(
+    W = W,
+    L1 = L1,
+    A1 = A1,
+    L2 = L2,
+    A2 = A2,
+    Y = Y
+  )
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  policy_seq <- repeat_policy_over_time(
+    mtp_additive_shift(delta = delta),
+    tau = ds$tau()
+  )
+
+  identity_seq <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+  list(
+    ds = ds,
+    policy_seq = policy_seq,
+    identity_seq = identity_seq
+  )
+}
+
+q_library <- list(
+  nadir::lnr_glm,
+  nadir::lnr_earth,
+  nadir::lnr_ranger
+)
+
+g_library <- list(
+  nadir::lnr_glm_density
+)
+
+objs <- make_example_objects(n = 2000, delta = 1)
+
+ds <- objs$ds
+policy_seq <- objs$policy_seq
+identity_seq <- objs$identity_seq
+
+nf_shift <- LMTPNuisanceFactory$new(
+  learners_g = g_library,
+  policy_seq = policy_seq,
+  A_type = "continuous",
+  g_mode = "density"
+)
+
+nf_identity <- LMTPNuisanceFactory$new(
+  learners_g = g_library,
+  policy_seq = identity_seq,
+  A_type = "continuous",
+  g_mode = "density"
+)
+
+fluct <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian()
+)
+
+task_shift_sl <- make_lmtp_tl_task(
+  ds = ds,
+  policy_seq = policy_seq,
+  nuisance_factory = nf_shift,
+  fluctuation = fluct,
+  learners_Q = q_library
+)
+
+task_identity_sl <- make_lmtp_tl_task(
+  ds = ds,
+  policy_seq = identity_seq,
+  nuisance_factory = nf_identity,
+  fluctuation = fluct,
+  learners_Q = q_library
+)
+
+fit_shift_sl <- task_shift_sl$run()
+fit_identity_sl <- task_identity_sl$run()
+
+print(fit_shift_sl)
+print(fit_identity_sl)
+
+fit_diff_sl <- lmtp_delta_contrast(
+  fit1 = fit_shift_sl,
+  fit0 = fit_identity_sl,
+  transform = "difference"
+)
+
+print(fit_diff_sl)
+
+comparison_sl <- data.frame(
+  parameter = c("E[Y]", "E[Y^d]", "E[Y^d] - E[Y]"),
+  truth = c(truth_EY, truth_EYd, truth_diff),
+  estimate = c(
+    fit_identity_sl$estimate,
+    fit_shift_sl$estimate,
+    fit_diff_sl$estimate
+  ),
+  se = c(
+    fit_identity_sl$se,
+    fit_shift_sl$se,
+    fit_diff_sl$se
+  )
+)
+
+comparison_sl
+```
+
+
+## Now Simulation Study with `nadir::super_learner()`
+
+```{r}
+one_rep_compare <- function(n = 2000,
+                            delta = 1,
+                            q_learners = stats::glm) {
+  W <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  df <- data.frame(
+    W = W,
+    L1 = L1,
+    A1 = A1,
+    L2 = L2,
+    A2 = A2,
+    Y = Y
+  )
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  policy_seq <- repeat_policy_over_time(
+    mtp_additive_shift(delta = delta),
+    tau = ds$tau()
+  )
+
+  identity_seq <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+  nf_shift <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = policy_seq,
+    A_type = "continuous",
+    g_mode = "density"
+  )
+
+  nf_identity <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = identity_seq,
+    A_type = "continuous",
+    g_mode = "density"
+  )
+
+  fluct <- LMTPFluctuationSubmodel$new(
+    family = stats::gaussian()
+  )
+
+  fit_shift <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = policy_seq,
+    nuisance_factory = nf_shift,
+    fluctuation = fluct,
+    learners_Q = q_learners
+  )$run()
+
+  fit_identity <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = identity_seq,
+    nuisance_factory = nf_identity,
+    fluctuation = fluct,
+    learners_Q = q_learners
+  )$run()
+
+  fit_diff <- lmtp_delta_contrast(
+    fit1 = fit_shift,
+    fit0 = fit_identity,
+    transform = "difference"
+  )
+
+  c(
+    estimate = fit_diff$estimate,
+    se = fit_diff$se,
+    lower = fit_diff$ci["lower"],
+    upper = fit_diff$ci["upper"],
+    covered = as.numeric(
+      fit_diff$ci["lower"] <= truth_diff && truth_diff <= fit_diff$ci["upper"]
+    )
+  )
+}
+```
+
+
+```{r}
+q_library_small <- list(
+  nadir::lnr_glm,
+  nadir::lnr_earth,
+  nadir::lnr_ranger
+)
+```
+
+```{r}
+set.seed(2026)
+
+B <- 200
+
+sim_glm <- replicate(
+  B,
+  suppressMessages(one_rep_compare(
+    n = 200,
+    delta = 1,
+    q_learners = stats::glm
+  ))
+)
+
+sim_sl <- replicate(
+  B,
+  one_rep_compare(
+    n = 200,
+    delta = 1,
+    q_learners = q_library_small
+  )
+)
+
+sim_glm <- as.data.frame(t(sim_glm))
+sim_sl <- as.data.frame(t(sim_sl))
+```
+
+```{r}
+summarize_sim <- function(res, truth) {
+  data.frame(
+    mc_mean = mean(res$estimate),
+    bias = mean(res$estimate) - truth,
+    empirical_sd = stats::sd(res$estimate),
+    mean_estimated_se = mean(res$se),
+    coverage_95 = mean(res$covered)
+  )
+}
+
+summary_glm <- summarize_sim(sim_glm, truth = truth_diff)
+summary_sl <- summarize_sim(sim_sl, truth = truth_diff)
+
+summary_glm$method <- "GLM"
+summary_sl$method <- "Super Learner"
+
+sim_summary <- rbind(summary_glm, summary_sl)
+sim_summary <- sim_summary[, c("method", "mc_mean", "bias", "empirical_sd", "mean_estimated_se", "coverage_95")]
+
+sim_summary
+```

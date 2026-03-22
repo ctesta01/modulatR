@@ -1,0 +1,154 @@
+---
+title: "Small-Example"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+In this example we show estimating the counterfactual mean $E[Y^d]$ under a
+LMTP using TMLE via `TL_Task`.
+
+```{r setup}
+devtools::load_all(".")
+library(TargetedLearning)
+
+
+set.seed(123)
+n <- 300
+
+# ------------------------------------------------------------------
+# Simulate simple two-timepoint longitudinal data
+# ------------------------------------------------------------------
+W1 <- rnorm(n)
+L1 <- rnorm(n, mean = 0.4 * W1)
+
+A1 <- rbinom(n, 1, plogis(0.5 * W1 - 0.7 * L1))
+
+L2 <- rnorm(n, mean = 0.3 * W1 + 0.8 * A1 + 0.4 * L1)
+
+A2 <- rbinom(n, 1, plogis(-0.2 * W1 + 0.9 * L2))
+
+Y <- rbinom(n, 1, plogis(-0.3 + 0.4 * W1 + 0.6 * A1 + 0.9 * A2 + 0.5 * L2))
+
+df <- data.frame(
+  W1 = W1,
+  L1 = L1,
+  A1 = A1,
+  L2 = L2,
+  A2 = A2,
+  Y = Y
+)
+
+# ------------------------------------------------------------------
+# Wrap data in LMTPData
+# ------------------------------------------------------------------
+ds <- LMTPData$new(
+  data = df,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W1",
+  Y_col = "Y"
+)
+
+print(ds)
+
+# ------------------------------------------------------------------
+# Define an LMTP: flip binary treatment at each time
+# ------------------------------------------------------------------
+mtp_flip <- mtp_discrete(
+  map_fun = function(A, H) 1 - A,
+  support = c(0, 1),
+  name = "flip_binary"
+)
+
+policy_seq <- repeat_policy_over_time(mtp_flip, tau = ds$tau())
+
+print(policy_seq)
+
+# ------------------------------------------------------------------
+# Nuisance factory:
+# - g_t via logistic regression
+# - Q_t via logistic fluctuation / logistic regression recursion
+# ------------------------------------------------------------------
+nf <- LMTPNuisanceFactory$new(
+  learners_g = stats::glm,
+  policy_seq = policy_seq,
+  A_type = "discrete",
+  g_mode = "density",
+  learners_g_extra_args = list(family = stats::binomial())
+)
+
+fluct <- LMTPFluctuationSubmodel$new(
+  family = stats::binomial(),
+  bounds = c(0, 1)
+)
+
+# ------------------------------------------------------------------
+# Build TL_Task and run
+# ------------------------------------------------------------------
+task <- make_lmtp_tl_task(
+  ds = ds,
+  policy_seq = policy_seq,
+  nuisance_factory = nf,
+  fluctuation = fluct,
+  learners_Q = stats::glm,
+  learners_Q_extra_args = list(family = stats::binomial())
+)
+
+fit <- task$run()
+
+print(fit)
+
+fit$estimate
+fit$se
+fit$ci
+
+head(fit$eif)
+
+# ------------------------------------------------------------------
+# Also estimate E[Y] under the identity policy
+# ------------------------------------------------------------------
+identity_seq <- identity_policy(
+  A_type = "discrete",
+  discrete_support = c(0, 1),
+  tau = ds$tau()
+)
+
+nf_obs <- LMTPNuisanceFactory$new(
+  learners_g = stats::glm,
+  policy_seq = identity_seq,
+  A_type = "discrete",
+  g_mode = "density",
+  learners_g_extra_args = list(family = stats::binomial())
+)
+
+task_obs <- make_lmtp_tl_task(
+  ds = ds,
+  policy_seq = identity_seq,
+  nuisance_factory = nf_obs,
+  fluctuation = fluct,
+  learners_Q = stats::glm,
+  learners_Q_extra_args = list(family = stats::binomial())
+)
+
+fit_obs <- task_obs$run()
+
+print(fit_obs)
+
+# ------------------------------------------------------------------
+# Delta-method contrast: E[Y^d] - E[Y]
+# ------------------------------------------------------------------
+fit_diff <- lmtp_delta_contrast(
+  fit1 = fit,
+  fit0 = fit_obs,
+  transform = "difference"
+)
+
+print(fit_diff)
+fit_diff$estimate
+fit_diff$ci
+```

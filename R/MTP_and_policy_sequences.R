@@ -1,349 +1,681 @@
 
-# MTP Class ---------------------------------------------------------------
+# MTP Class Definition ----------------------------------------------------
 
-MTP <- R6::R6Class("MTP",
+#' Single-time modified treatment policy
+#'
+#' @description
+#' `MTP` represents a deterministic single-time modified treatment policy.
+#'
+#' It supports two common cases:
+#' \itemize{
+#'   \item discrete treatments, where the post-policy mass function can be
+#'   computed by summing over pre-images;
+#'   \item continuous treatments, where the policy is assumed piecewise
+#'   invertible and the post-policy density can be computed via a
+#'   change-of-variables formula.
+#' }
+#'
+#' For continuous treatments, users supply a collection of policy regions and,
+#' for each region, the forward map, inverse map, and inverse derivative.
+#' This is the setup used for piecewise smooth LMTPs in Díaz et al. (2023).
+#'
+#' @export
+#' @examples
+#' ## -------------------------------------------------
+#' ## Continuous MTP: simple additive shift A -> A + 1
+#' ## -------------------------------------------------
+#'
+#' n <- 100
+#' H <- data.frame(W = rnorm(n))
+#' A <- rnorm(n)
+#'
+#' mtp <- MTP$new(
+#'   treatment_type = "continuous",
+#'   region_predicates = list(
+#'     function(A, H) rep(TRUE, length(A))
+#'   ),
+#'   policy_pieces = list(
+#'     function(A, H) A + 1
+#'   ),
+#'   inverse_map_pieces = list(
+#'     function(A_star, H) A_star - 1
+#'   ),
+#'   inverse_deriv_pieces = list(
+#'     function(A_star, H) rep(1, length(A_star))
+#'   ),
+#'   name = "shift_plus_one"
+#' )
+#'
+#' mtp
+#'
+#' # Apply policy
+#' A_star <- mtp$apply_policy(A, H)
+#' head(cbind(A, A_star))
+#'
+#' ## -------------------------------------------------
+#' ## Discrete MTP: flip binary treatment
+#' ## -------------------------------------------------
+#'
+#' A_bin <- rbinom(n, 1, 0.5)
+#'
+#' mtp_flip <- MTP$new(
+#'   treatment_type = "discrete",
+#'   region_predicates = list(
+#'     function(A, H) rep(TRUE, length(A))
+#'   ),
+#'   policy_pieces = list(
+#'     function(A, H) 1 - A
+#'   ),
+#'   support = c(0, 1),
+#'   name = "flip_binary"
+#' )
+#'
+#' mtp_flip
+#'
+#' A_star <- mtp_flip$apply_policy(A_bin, H)
+#' head(cbind(A_bin, A_star))
+MTP <- R6::R6Class(
+  "MTP",
   public = list(
-    # ---- User-provided components (lists of same length)
-    region_predicates      = NULL, # list of f_j(A, L) -> TRUE/FALSE, whether d(A, L) lies in I_j where d=d_j
-    policy_pieces          = NULL, # list of d_j(A, L) -> A_star
-    inverse_map_pieces     = NULL, # list of b_j(A_star, L) -> A     (inverse of d_j on that piece's image)
-    inverse_deriv_pieces   = NULL, # list of db_j(A_star, L) -> d/dA_star b_j(A_star, L)
+    #' @field treatment_type Either `"continuous"` or `"discrete"`.
+    treatment_type = NULL,
 
-    # ---- Constructor
-    initialize = function(region_predicates,
+    #' @field name Optional name for the policy.
+    name = NULL,
+
+    #' @field region_predicates List of functions `(A, H) -> logical`
+    #'   defining the regions of the observed treatment space.
+    region_predicates = NULL,
+
+    #' @field policy_pieces List of functions `(A, H) -> A_star`
+    #'   defining the forward map on each region.
+    policy_pieces = NULL,
+
+    #' @field inverse_map_pieces List of functions `(A_star, H) -> A`
+    #'   giving the inverse map on each region.
+    inverse_map_pieces = NULL,
+
+    #' @field inverse_deriv_pieces List of functions `(A_star, H) -> numeric`
+    #'   giving the derivative of the inverse map on each region.
+    inverse_deriv_pieces = NULL,
+
+    #' @field support Optional vector of support values for discrete treatment.
+    support = NULL,
+
+    #' @description Create a new single-time MTP.
+    #' @param treatment_type Either `"continuous"` or `"discrete"`.
+    #' @param region_predicates List of region-membership functions.
+    #' @param policy_pieces List of forward-map functions.
+    #' @param inverse_map_pieces List of inverse-map functions. Required for
+    #'   continuous treatments.
+    #' @param inverse_deriv_pieces List of inverse-derivative functions.
+    #'   Required for continuous treatments.
+    #' @param support Optional support for discrete treatments.
+    #' @param name Optional name.
+    initialize = function(treatment_type = c("continuous", "discrete"),
+                          region_predicates,
                           policy_pieces,
-                          inverse_map_pieces,
-                          inverse_deriv_pieces) {
-
-      # Allow singletons (non-piecewise) for convenience -- turn them into a length=1 list
-      if (is.function(region_predicates))    region_predicates    <- list(region_predicates)
-      if (is.function(policy_pieces))        policy_pieces        <- list(policy_pieces)
-      if (is.function(inverse_map_pieces))   inverse_map_pieces   <- list(inverse_map_pieces)
-      if (is.function(inverse_deriv_pieces)) inverse_deriv_pieces <- list(inverse_deriv_pieces)
-
-      # Pre-flight checks
-      stops <- c(
-        "region_predicates must be a non-empty list of functions" =
-          !(is.list(region_predicates) &&
-              length(region_predicates) > 0 &&
-              all(sapply(region_predicates, is.function))),
-        "policy_pieces must be a list of functions of the same length" =
-          !(
-            is.list(policy_pieces) &&
-              length(policy_pieces) == length(region_predicates) &&
-              all(sapply(policy_pieces, is.function))
-          ),
-        "inverse_map_pieces must be a list of functions of the same length" =
-          !(
-            is.list(inverse_map_pieces) &&
-              length(inverse_map_pieces) == length(region_predicates) &&
-              all(sapply(inverse_map_pieces, is.function))
-          ),
-        "inverse_deriv_pieces must be a list of functions of the same length" =
-          !(
-            is.list(inverse_deriv_pieces) &&
-              length(inverse_deriv_pieces) == length(region_predicates) &&
-              all(sapply(inverse_deriv_pieces, is.function))
-          )
-      )
-      bad <- names(stops)[unlist(stops)]
-      if (length(bad)) stop(paste(bad, collapse = "\n"))
-
-      self$region_predicates    <- region_predicates
-      self$policy_pieces        <- policy_pieces
-      self$inverse_map_pieces   <- inverse_map_pieces
+                          inverse_map_pieces = NULL,
+                          inverse_deriv_pieces = NULL,
+                          support = NULL,
+                          name = NULL) {
+      self$treatment_type <- match.arg(treatment_type)
+      self$region_predicates <- region_predicates
+      self$policy_pieces <- policy_pieces
+      self$inverse_map_pieces <- inverse_map_pieces
       self$inverse_deriv_pieces <- inverse_deriv_pieces
+      self$support <- support
+      self$name <- name %||% paste0("MTP<", self$treatment_type, ">")
+
+      private$validate()
+      invisible(self)
     },
 
-    # ---- Helper: ensure L is a data frame with rows matching A
-    .coerce_AL = function(A, L) {
-      if (is.vector(L) || is.atomic(L)) L <- data.frame(L = L)
-      if (!is.data.frame(L)) stop("L must be a data.frame (or a vector/atomic, which will be wrapped).")
-      if (length(A) != nrow(L)) stop("A and L must have the same number of observations.")
-      list(A = as.vector(A), L = L)
-    },
+    #' @description Apply the policy to observed treatment values.
+    #' @param A_vec Vector of observed treatment values.
+    #' @param H_df Data frame of histories `H_t`.
+    #' @return Vector of shifted treatment values.
+    apply_policy = function(A_vec, H_df) {
+      private$validate_inputs(A_vec, H_df)
 
-    # ---- Which piece applies for a single (A, L) *by domain predicate on natural A*
-    piece_index_for_natural = function(A, L) {
-      if (length(A) != 1L) stop("Provide a single A for piece_index_for_natural().")
-      truth <- vapply(self$region_predicates, function(f) isTRUE(f(A, L)), logical(1))
-      idx <- which(truth)
-      if (length(idx) == 0L) return(NA_integer_)
-      if (length(idx) > 1L) stop(paste0("More than one region predicate applies to (A: ", A, ", L: ", L, ")"))
-      idx[[1]]
-    },
-
-    # ---- Vectorized: which piece for each (A, L) by *natural* A
-    piece_index_for_natural_vec = function(A, L) {
-      AL <- self$.coerce_AL(A, L)
-      A <- AL$A
-      L <- AL$L
-      vapply(seq_along(A), function(i) {
-        self$piece_index_for_natural(A[i], L[i, , drop = FALSE]) },
-        integer(1)
+      region_mat <- sapply(
+        seq_along(self$region_predicates),
+        function(j) self$region_predicates[[j]](A_vec, H_df)
       )
+
+      if (!is.matrix(region_mat)) {
+        region_mat <- matrix(region_mat, ncol = length(self$region_predicates))
+      }
+
+      n_hits <- rowSums(region_mat)
+      if (any(n_hits == 0)) {
+        stop("Some observations do not belong to any policy region.")
+      }
+      if (any(n_hits > 1)) {
+        stop("Some observations belong to more than one policy region.")
+      }
+
+      out <- vector(mode = mode(A_vec), length = length(A_vec))
+      for (j in seq_along(self$policy_pieces)) {
+        idx <- region_mat[, j]
+        if (any(idx)) {
+          out[idx] <- self$policy_pieces[[j]](A_vec[idx], H_df[idx, , drop = FALSE])
+        }
+      }
+
+      out
+    },
+    #' @description Evaluate the density ratio r(a, h) = g^d(a | h) / g(a | h)
+    #'   from an observed-data density function.
+    #' @param A_vec Vector of observed treatment values.
+    #' @param H_df Data frame of histories `H_t`.
+    #' @param density_fun Function `(A_vec, H_df) -> g(a | h)`.
+    #' @return Numeric vector of density ratios.
+    ratio_from_density = function(A_vec, H_df, density_fun) {
+      g_obs <- density_fun(A_vec, H_df)
+      g_post <- self$gd_from_density(A_vec, H_df, density_fun = density_fun)
+      g_post / g_obs
     },
 
-    # ---- Forward application d_j(A,L) -> A_star (vectorized)
-    apply_policy = function(A, L) {
-      AL <- self$.coerce_AL(A, L); A <- AL$A; L <- AL$L
-      idx <- self$piece_index_for_natural_vec(A, L)
-      vapply(seq_along(A), function(i) {
-        j <- idx[i]
-        if (is.na(j)) return(NA_real_)
-        self$policy_pieces[[j]](A[i], L[i, , drop = FALSE])
-      }, numeric(1))
+    #' @description Compute the post-policy density or mass function
+    #'   `g^d(a | h)` from an observed-data density or mass function.
+    #' @param A_vec Vector of treatment values at which to evaluate
+    #'   the post-policy distribution.
+    #' @param H_df Data frame of histories `H_t`.
+    #' @param density_fun Function `(A_vec, H_df) -> g(a | h)`.
+    #' @return Numeric vector.
+    gd_from_density = function(A_vec, H_df, density_fun) {
+      private$validate_inputs(A_vec, H_df)
+
+      if (!is.function(density_fun)) {
+        stop("`density_fun` must be a function of `(A_vec, H_df)`.")
+      }
+
+      if (self$treatment_type == "continuous") {
+        return(private$gd_continuous(A_vec, H_df, density_fun))
+      }
+
+      private$gd_discrete(A_vec, H_df, density_fun)
     },
 
-    # ---- Given (A_star, L), find the appropriate pieces
-    # We try each piece: A_nat <- b_j(A_star,L); check predicate_j(A_nat,L) AND d_j(A_nat,L) == A_star (within tol)
-    .piece_indices_from_image = function(A_star, L, tol = 1e-8) {
-      which(vapply(seq_along(self$inverse_map_pieces), function(j) {
-        a_nat <- self$inverse_map_pieces[[j]](A_star, L)
-        ok_reg <- isTRUE(self$region_predicates[[j]](a_nat, L))
-        if (!ok_reg) return(FALSE)
-        a_fwd <- self$policy_pieces[[j]](a_nat, L)
-        is.finite(a_nat) && is.finite(a_fwd) && abs(a_fwd - A_star) <= tol
-      }, logical(1)))
-    },
+    #' @description Print a compact policy summary.
+    #' @return The object invisibly.
+    print = function(...) {
+      cat("MTP\n")
+      cat("  name: ", self$name, "\n", sep = "")
+      cat("  treatment_type: ", self$treatment_type, "\n", sep = "")
+      cat("  n_regions: ", length(self$policy_pieces), "\n", sep = "")
+      if (self$treatment_type == "discrete" && !is.null(self$support)) {
+        cat("  support: ", paste(self$support, collapse = ", "), "\n", sep = "")
+      }
+      invisible(self)
+    }
+  ),
 
-    # ---- Vectorized inverse: b_j(A_star, L) -> A
-    apply_inverse_policy = function(A_star, L, tol = 1e-8) {
-      AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      lapply(seq_along(A_star), function(i) {
-        js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
-        if (length(js) == 0L) return(numeric(0))
-        vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
-      })
-    },
+  private = list(
+    validate = function() {
+      if (!is.list(self$region_predicates) || length(self$region_predicates) < 1L) {
+        stop("`region_predicates` must be a non-empty list.")
+      }
 
-    # ---- Jacobian for change-of-variables: b'_j(A_star, L)
-    inverse_derivative = function(A_star, L, tol = 1e-8) {
-      AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      lapply(seq_along(A_star), function(i) {
-        js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
-        if (length(js) == 0L) return(numeric(0))
-        vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
-      })
-    },
+      if (!is.list(self$policy_pieces) || length(self$policy_pieces) < 1L) {
+        stop("`policy_pieces` must be a non-empty list.")
+      }
 
-    # Piecewise contributions for g^d at (A*, L) given a density function g(a | L)
-    # density_fun takes (a_vec, L_row_df) -> numeric vector of densities
-    gd_contributions = function(A_star, L, density_fun, tol = 1e-8) {
-      AL <- self$.coerce_AL(A_star, L); A_star <- AL$A; L <- AL$L
-      contributions <- lapply(seq_along(A_star), function(i) {
-        js <- self$.piece_indices_from_image(A_star[i], L[i, , drop = FALSE], tol = tol)
-        if (length(js) == 0L) return(
-          data.frame(piece = integer(0), a_pre = numeric(0), jac = numeric(0),
-                     dens = numeric(0), term = numeric(0))
+      if (length(self$region_predicates) != length(self$policy_pieces)) {
+        stop("`region_predicates` and `policy_pieces` must have the same length.")
+      }
+
+      ok_pred <- vapply(self$region_predicates, is.function, logical(1))
+      ok_pol  <- vapply(self$policy_pieces, is.function, logical(1))
+
+      if (!all(ok_pred)) stop("All `region_predicates` must be functions.")
+      if (!all(ok_pol))  stop("All `policy_pieces` must be functions.")
+
+      if (self$treatment_type == "continuous") {
+        if (is.null(self$inverse_map_pieces) || is.null(self$inverse_deriv_pieces)) {
+          stop(
+            "For continuous treatments, `inverse_map_pieces` and ",
+            "`inverse_deriv_pieces` must be supplied."
+          )
+        }
+
+        if (!is.list(self$inverse_map_pieces) ||
+            !is.list(self$inverse_deriv_pieces) ||
+            length(self$inverse_map_pieces) != length(self$policy_pieces) ||
+            length(self$inverse_deriv_pieces) != length(self$policy_pieces)) {
+          stop(
+            "For continuous treatments, inverse maps and inverse derivatives ",
+            "must be lists of the same length as `policy_pieces`."
+          )
+        }
+
+        ok_inv  <- vapply(self$inverse_map_pieces, is.function, logical(1))
+        ok_dinv <- vapply(self$inverse_deriv_pieces, is.function, logical(1))
+
+        if (!all(ok_inv)) {
+          stop("All `inverse_map_pieces` must be functions.")
+        }
+        if (!all(ok_dinv)) {
+          stop("All `inverse_deriv_pieces` must be functions.")
+        }
+      }
+
+      if (self$treatment_type == "discrete" && is.null(self$support)) {
+        warning(
+          "Discrete `MTP` created without `support`. ",
+          "`gd_from_density()` will require `support`."
         )
-        a_pre  <- vapply(js, function(j) self$inverse_map_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
-        jac    <- vapply(js, function(j) self$inverse_deriv_pieces[[j]](A_star[i], L[i, , drop = FALSE]), numeric(1))
-        # dens   <- density_fun(a_pre, L[i, , drop = FALSE])
-        L_repeated <- L[rep(i, length(js)), , drop = FALSE]
-        contributions <- data.frame(i = i, piece = js, a_pre = a_pre, jac = jac, L_repeated, row.names = NULL)
-        # contributions <- dplyr::bind_cols(contributions, L_repeated)
-        return(contributions)
-      })
-      contributions <- dplyr::bind_rows(contributions)
-
-      # print(colnames(L))
-      # print(colnames(contributions))
-      # print(contributions)
-      contributions$dens <- density_fun(contributions$a_pre, contributions[,colnames(L)])
-      contributions$term <- abs(contributions$jac) * contributions$dens
-      return(contributions)
+      }
     },
 
-    # Sum over pieces to get g^d(A* | L) (vectorized over rows)
-    gd_from_density = function(A_star, L, density_fun, tol = 1e-8) {
-      contribs <- self$gd_contributions(A_star, L, density_fun, tol = tol)
-      # vapply(contribs, function(df) if (nrow(df) == 0) 0 else sum(df$term), numeric(1))
-      contribs <- contribs |> group_by(i) |>
-        summarize(term = sum(term)) |>
-        pull(term)
-      contribs
+    validate_inputs = function(A_vec, H_df) {
+      if (length(A_vec) != nrow(H_df)) {
+        stop("`length(A_vec)` must equal `nrow(H_df)`.")
+      }
     },
 
-    # ---- Diagnostics: check that d_j(b_j(a*,L),L) ~= a* on a grid of a* values you pass
-    validate_bijections = function(A_star_grid, L, tol = 1e-6) {
-      A_back  <- self$apply_inverse_policy(A_star_grid, L)
-      A_fwd   <- self$apply_policy(A_back, L)
-      data.frame(A_star = A_star_grid, A_back = A_back, A_fwd = A_fwd,
-                 ok = is.finite(A_back) & is.finite(A_fwd) & (abs(A_fwd - A_star_grid) <= tol))
+    eval_region = function(j, A_vec, H_df) {
+      out <- self$region_predicates[[j]](A_vec, H_df)
+
+      if (!is.logical(out) || length(out) != length(A_vec)) {
+        stop(
+          "Region predicate ", j,
+          " must return a logical vector of length length(A_vec)."
+        )
+      }
+
+      out
+    },
+
+    gd_continuous = function(A_vec, H_df, density_fun, tol = 1e-8) {
+      out <- numeric(length(A_vec))
+
+      for (j in seq_along(self$inverse_map_pieces)) {
+        a_back <- self$inverse_map_pieces[[j]](A_vec, H_df)
+
+        in_region <- self$region_predicates[[j]](a_back, H_df)
+        if (!is.logical(in_region) || length(in_region) != length(A_vec)) {
+          stop(
+            "Region predicate ", j,
+            " must return a logical vector of length length(A_vec)."
+          )
+        }
+
+        if (!any(in_region)) {
+          next
+        }
+
+        A_forward <- self$policy_pieces[[j]](
+          a_back[in_region],
+          H_df[in_region, , drop = FALSE]
+        )
+
+        matches_target <- abs(A_forward - A_vec[in_region]) < tol
+        if (!all(matches_target)) {
+          keep_idx <- which(in_region)
+          in_region[keep_idx[!matches_target]] <- FALSE
+        }
+
+        if (!any(in_region)) {
+          next
+        }
+
+        jac <- self$inverse_deriv_pieces[[j]](
+          A_vec[in_region],
+          H_df[in_region, , drop = FALSE]
+        )
+        g_back <- density_fun(
+          a_back[in_region],
+          H_df[in_region, , drop = FALSE]
+        )
+
+        if (length(g_back) != sum(in_region)) {
+          stop("`density_fun` must return a vector of the same length as its input `A_vec`.")
+        }
+        if (length(jac) != sum(in_region)) {
+          stop(
+            "Inverse derivative function ", j,
+            " must return a vector of the same length as its input `A_vec`."
+          )
+        }
+
+        out[in_region] <- out[in_region] + g_back * abs(jac)
+      }
+
+      out
+    },
+
+    gd_discrete = function(A_vec, H_df, density_fun) {
+      if (is.null(self$support)) {
+        stop("For discrete treatments, `support` must be supplied.")
+      }
+
+      out <- numeric(length(A_vec))
+
+      for (s in self$support) {
+        s_vec <- rep(s, length(A_vec))
+        a_star <- self$apply_policy(s_vec, H_df)
+        hits <- a_star == A_vec
+        if (any(hits)) {
+          g_s <- density_fun(s_vec, H_df)
+          out <- out + as.numeric(hits) * g_s
+        }
+      }
+
+      out
     }
   )
 )
 
-# Helpers to coerce scalar-or-function into function(L)->scalar
-#' @keywords internal
-.num_to_fun <- function(x) if (is.function(x)) x else (function(L) x)
-
-#' Additive-shift MTP Construction Helper
-#'
-#' d(A,L) = A + delta  if lower(L) <= A + delta <= upper(L), else A
-#' Inverse branches for a* are: a* - delta (shift piece), a* (identity piece).
-#' @export
-mtp_additive_shift <- function(delta,
-                               lower = -Inf,
-                               upper =  Inf) {
-  lower_fun <- .num_to_fun(lower)
-  upper_fun <- .num_to_fun(upper)
-
-  # piece 1: shift feasible
-  pred_shift <- function(A, L) {
-    lo <- lower_fun(L); hi <- upper_fun(L)
-    isTRUE(A + delta >= lo && A + delta <= hi)
-  }
-  d_shift   <- function(A, L) A + delta
-  b_shift   <- function(A_star, L) A_star - delta   # inverse on image
-  db_shift  <- function(A_star, L) 1                # d/dA* of b_shift
-
-  # piece 2: otherwise identity
-  pred_id   <- function(A, L) !isTRUE(pred_shift(A, L))
-  d_id      <- function(A, L) A
-  b_id      <- function(A_star, L) A_star
-  db_id     <- function(A_star, L) 1
-
-  MTP$new(
-    region_predicates    = list(pred_shift, pred_id),
-    policy_pieces        = list(d_shift,     d_id),
-    inverse_map_pieces   = list(b_shift,     b_id),
-    inverse_deriv_pieces = list(db_shift,    db_id)
-  )
-}
-
-#' Multiplicative-shift MTP Construction Helper
-#'
-#' d(A,L) = k * A  if lower(L) <= k*A <= upper(L), else A
-#' Inverse branches for a* are: a*/k (shift piece), a* (identity).
-#' Note: require k != 0; for k<0 the mapping flips order but is still invertible.
-mtp_multiplicative_shift <- function(k,
-                                     lower = 0,
-                                     upper = Inf) {
-  if (k == 0) stop("k must be non-zero for invertibility.")
-  lower_fun <- .num_to_fun(lower)
-  upper_fun <- .num_to_fun(upper)
-
-  pred_mult <- function(A, L) {
-    lo <- lower_fun(L); hi <- upper_fun(L)
-    a_star <- k * A
-    isTRUE(a_star >= lo && a_star <= hi)
-  }
-  d_mult  <- function(A, L) k * A
-  b_mult  <- function(A_star, L) A_star / k
-  db_mult <- function(A_star, L) 1 / k
-
-  pred_id <- function(A, L) !isTRUE(pred_mult(A, L))
-  d_id    <- function(A, L) A
-  b_id    <- function(A_star, L) A_star
-  db_id   <- function(A_star, L) 1
-
-  MTP$new(
-    region_predicates    = list(pred_mult,  pred_id),
-    policy_pieces        = list(d_mult,     d_id),
-    inverse_map_pieces   = list(b_mult,     b_id),
-    inverse_deriv_pieces = list(db_mult,    db_id)
-  )
-}
 
 
+# LMTPPolicySequence Class Definition -------------------------------------
 
-# Policy Sequence Class -------------------------------------------------------
 
-#' LMTP policy sequence
+#' Longitudinal modified treatment policy sequence
 #'
 #' @description
-#' `LMTPPolicySequence` stores a list of single-time modified treatment
-#' policies (MTPs) and provides convenience methods to apply them over
-#' time. Each element of `policies` must implement at least two methods:
-#' `apply_policy(A_vec, H_df)` and `gd_from_density(A_vec, H_df, density_fun)`.
-#'
-#' @section References:
-#'   Longitudinal modified treatment policies are described in Diaz et al. (2023).\
-#'   See also the `lmtp` package for reference implementations.
+#' `LMTPPolicySequence` stores one single-time `MTP` for each treatment time.
+#' It provides methods for applying the policy at time `t`, evaluating the
+#' post-policy treatment distribution at time `t`, and checking compatibility
+#' with an `LMTPData` object.
 #'
 #' @export
+#' @examples
+#' ## -------------------------------------------------
+#' ## Policy sequence with two timepoints
+#' ## -------------------------------------------------
+#'
+#' n <- 100
+#'
+#' df <- data.frame(
+#'   W = rnorm(n),
+#'   L1 = rnorm(n),
+#'   A1 = rnorm(n),
+#'   L2 = rnorm(n),
+#'   A2 = rnorm(n),
+#'   Y  = rnorm(n)
+#' )
+#'
+#' ds <- LMTPData$new(
+#'   data = df,
+#'   A_cols = c("A1", "A2"),
+#'   L_cols = list("L1", "L2"),
+#'   W_cols = "W",
+#'   Y_col = "Y"
+#' )
+#'
+#' # Define a simple additive shift policy
+#' mtp <- mtp_additive_shift(delta = 0.5)
+#'
+#' policy_seq <- LMTPPolicySequence$new(
+#'   policies = list(mtp, mtp)
+#' )
+#'
+#' policy_seq
+#'
+#' # Apply policy at time 1
+#' A1_star <- policy_seq$apply_t(1, ds$A(1), ds$H(1))
+#' head(cbind(A1 = ds$A(1), A1_star))
+#'
+#' # Apply full sequence
+#' out <- policy_seq$apply_to_data(ds)
+#' head(out)
 LMTPPolicySequence <- R6::R6Class(
   "LMTPPolicySequence",
   public = list(
-    #' @field policies List of per-time MTP objects (length tau).
+    #' @field policies List of `MTP` objects, one for each time point.
     policies = NULL,
+
+    #' @field name Optional name for the policy sequence.
+    name = NULL,
+
     #' @description Create a new LMTP policy sequence.
-    #' @param policies List of per-time MTP objects.
-    initialize = function(policies) {
-      stopifnot(is.list(policies), length(policies) >= 1)
+    #' @param policies List of `MTP` objects.
+    #' @param name Optional name.
+    initialize = function(policies, name = NULL) {
       self$policies <- policies
+      self$name <- name %||% "LMTPPolicySequence"
+      private$validate()
+      invisible(self)
     },
-    #' @description Number of time points (tau).
-    #' @return Integer number of time points.
-    tau = function() length(self$policies),
-    #' @description Apply the t-th policy to a treatment vector.
-    #' @param t Time index (1-based).
-    #' @param A_vec Numeric or factor vector of observed treatment at time `t`.
-    #' @param H_df Data frame with history covariates `H_t`.
-    #' @return Vector of shifted treatment values `A_t^d`.
-    apply_policy_t = function(t, A_vec, H_df) {
+
+    #' @description Number of time points.
+    #' @return Integer `tau`.
+    tau = function() {
+      length(self$policies)
+    },
+
+    #' @description Return the t-th single-time policy.
+    #' @param t Time index.
+    #' @return An `MTP`.
+    policy_t = function(t) {
+      private$check_t(t)
+      self$policies[[t]]
+    },
+
+    #' @description Apply the t-th policy.
+    #' @param t Time index.
+    #' @param A_vec Vector of observed treatment values.
+    #' @param H_df Data frame of histories `H_t`.
+    #' @return Vector of shifted treatment values.
+    apply_t = function(t, A_vec, H_df) {
+      private$check_t(t)
       self$policies[[t]]$apply_policy(A_vec, H_df)
     },
-    #' @description Compute the post-policy density `g_t^d(A_t | H_t)` from
-    #'   a supplied conditional density estimator.
-    #' @param t Time index (1-based).
+
+    #' @description Evaluate the post-policy density or mass at time `t`.
+    #' @param t Time index.
     #' @param A_vec Vector of treatment values.
-    #' @param H_df Data frame of history covariates.
-    #' @param density_fun Function `(A_vec, H_df) -> g_t(A_t | H_t)`.
-    #' @return Numeric vector of `g_t^d(A_t | H_t)`.
-    gd_from_density_t = function(t, A_vec, H_df, density_fun) {
+    #' @param H_df Data frame of histories `H_t`.
+    #' @param density_fun Function `(A_vec, H_df) -> g_t(a | h)`.
+    #' @return Numeric vector.
+    gd_t = function(t, A_vec, H_df, density_fun) {
+      private$check_t(t)
       self$policies[[t]]$gd_from_density(A_vec, H_df, density_fun = density_fun)
+    },
+
+    #' @description Evaluate the density ratio
+    #'   `r_t(a, h) = g_t^d(a | h) / g_t(a | h)`.
+    #' @param t Time index.
+    #' @param A_vec Vector of treatment values.
+    #' @param H_df Data frame of histories `H_t`.
+    #' @param density_fun Function `(A_vec, H_df) -> g_t(a | h)`.
+    #' @return Numeric vector.
+    ratio_t = function(t, A_vec, H_df, density_fun) {
+      private$check_t(t)
+      self$policies[[t]]$ratio_from_density(A_vec, H_df, density_fun = density_fun)
+    },
+
+    #' @description Apply the full sequence to an `LMTPData` object.
+    #' @param data An `LMTPData` object.
+    #' @return A data.frame with id, observed treatment, and shifted treatment
+    #'   at each time.
+    apply_to_data = function(data) {
+      if (!inherits(data, "LMTPData")) {
+        stop("`data` must inherit from `LMTPData`.")
+      }
+      self$validate_against_data(data)
+
+      out <- data.frame(row.names = seq_len(data$n))
+      out[[data$id_col]] <- data$df[[data$id_col]]
+
+      for (t in seq_len(self$tau())) {
+        A_name <- data$A_cols[[t]]
+        A_star_name <- paste0(A_name, "_star")
+
+        out[[A_name]] <- data$A(t)
+        out[[A_star_name]] <- self$apply_t(t, data$A(t), data$H(t))
+      }
+
+      out
+    },
+
+    #' @description Check that the sequence length matches an `LMTPData` object.
+    #' @param data An `LMTPData` object.
+    #' @return Invisibly `TRUE` if compatible.
+    validate_against_data = function(data) {
+      if (!inherits(data, "LMTPData")) {
+        stop("`data` must inherit from `LMTPData`.")
+      }
+
+      if (self$tau() != data$tau()) {
+        stop(
+          "Policy sequence has tau = ", self$tau(),
+          " but `LMTPData` has tau = ", data$tau(), "."
+        )
+      }
+
+      invisible(TRUE)
+    },
+
+    #' @description Print a compact summary.
+    #' @return The object invisibly.
+    print = function(...) {
+      cat("LMTPPolicySequence\n")
+      cat("  name: ", self$name, "\n", sep = "")
+      cat("  tau: ", self$tau(), "\n", sep = "")
+      cat("  policies:\n")
+      for (t in seq_len(self$tau())) {
+        cat(
+          "    t = ", t, ": ",
+          self$policies[[t]]$name,
+          " [", self$policies[[t]]$treatment_type, "]\n",
+          sep = ""
+        )
+      }
+      invisible(self)
+    }
+  ),
+
+  private = list(
+    validate = function() {
+      if (!is.list(self$policies) || length(self$policies) < 1L) {
+        stop("`policies` must be a non-empty list.")
+      }
+
+      ok <- vapply(
+        self$policies,
+        function(x) inherits(x, "MTP"),
+        logical(1)
+      )
+
+      if (!all(ok)) {
+        stop("All elements of `policies` must inherit from `MTP`.")
+      }
+    },
+
+    check_t = function(t) {
+      if (!is.numeric(t) || length(t) != 1L || is.na(t)) {
+        stop("`t` must be a single non-missing numeric value.")
+      }
+
+      t <- as.integer(t)
+
+      if (t < 1L || t > length(self$policies)) {
+        stop("`t` must be between 1 and tau = ", length(self$policies), ".")
+      }
+
+      invisible(t)
     }
   )
 )
 
-#' Repeat a single-time MTP across all time points
+
+
+
+# helpers for MTPs --------------------------------------------------------
+
+
+#' Additive shift MTP for continuous treatment
 #'
-#' @param mtp A single-time MTP object implementing `apply_policy` and
-#'   `gd_from_density`.
-#' @param tau Integer number of time points.
+#' @param delta Numeric shift.
+#' @param upper_fun Function of `H_df` returning the feasible upper bound.
+#' @param lower_fun Optional function of `H_df` returning a lower bound.
+#' @param name Optional name.
 #'
-#' @return An `LMTPPolicySequence` where the same MTP is applied at each time.
+#' @return An `MTP`.
 #' @export
-repeat_policy_over_time <- function(mtp, tau) {
-  LMTPPolicySequence$new(rep(list(mtp), tau))
+mtp_additive_shift <- function(delta,
+                               upper_fun = function(H_df) rep(Inf, nrow(H_df)),
+                               lower_fun = function(H_df) rep(-Inf, nrow(H_df)),
+                               name = NULL) {
+  pred_shift <- function(A, H_df) {
+    lo <- lower_fun(H_df)
+    hi <- upper_fun(H_df)
+    (A + delta >= lo) & (A + delta <= hi)
+  }
+
+  pred_id <- function(A, H_df) {
+    !pred_shift(A, H_df)
+  }
+
+  d_shift <- function(A, H_df) A + delta
+  d_id    <- function(A, H_df) A
+
+  b_shift  <- function(A_star, H_df) A_star - delta
+  b_id     <- function(A_star, H_df) A_star
+
+  db_shift <- function(A_star, H_df) rep(1, length(A_star))
+  db_id    <- function(A_star, H_df) rep(1, length(A_star))
+
+  MTP$new(
+    treatment_type = "continuous",
+    region_predicates = list(pred_shift, pred_id),
+    policy_pieces = list(d_shift, d_id),
+    inverse_map_pieces = list(b_shift, b_id),
+    inverse_deriv_pieces = list(db_shift, db_id),
+    name = name %||% paste0("additive_shift(", delta, ")")
+  )
 }
 
-#' Construct per-time MTPs from a factory
+#' Lookup-table MTP for discrete treatment
 #'
-#' @description
-#' Build a list of per-time MTP objects by repeatedly calling a user-supplied
-#' factory function that maps `(t, A_name, H_names)` to a new MTP instance.
+#' @param map_fun Function `(A, H_df) -> A_star`.
+#' @param support Support of the observed treatment.
+#' @param name Optional name.
 #'
-#' @param A_cols Character vector of treatment column names `c("A1", ..., "AT")`.
-#' @param L_cols List of length `T`, each element a character vector of
-#'   time-varying covariate names at that time.
-#' @param W_cols Optional character vector of baseline covariate names.
-#' @param mtp_factory Function with signature `(t, A_name, H_names)` returning
-#'   a new MTP instance.
+#' @return An `MTP`.
+#' @export
+mtp_discrete <- function(map_fun, support, name = NULL) {
+  if (!is.function(map_fun)) {
+    stop("`map_fun` must be a function.")
+  }
+
+  MTP$new(
+    treatment_type = "discrete",
+    region_predicates = list(function(A, H_df) rep(TRUE, length(A))),
+    policy_pieces = list(map_fun),
+    support = support,
+    name = name %||% "discrete_mtp"
+  )
+}
+
+
+# helpers for constructing LMTPPolicySequence -----------------------------
+
+
+#' Repeat a single-time policy across all time points
+#'
+#' @param mtp An `MTP` object.
+#' @param tau Number of time points.
+#' @param name Optional name.
 #'
 #' @return An `LMTPPolicySequence`.
 #' @export
-make_per_time_policies <- function(
-    A_cols,
-    L_cols,
-    W_cols = NULL,
-    mtp_factory
-) {
-  stopifnot(length(A_cols) == length(L_cols))
-  tau <- length(A_cols)
-  policies <- vector("list", tau)
-  for (t in seq_len(tau)) {
-    A_name  <- A_cols[[t]]
-    H_names <- c(W_cols %||% character(0),
-                 unlist(L_cols[seq_len(t)], use.names = FALSE),
-                 if (t > 1) A_cols[seq_len(t - 1)] else character(0))
-    policies[[t]] <- mtp_factory(t, A_name, H_names)
+repeat_policy_over_time <- function(mtp, tau, name = NULL) {
+  if (!inherits(mtp, "MTP")) {
+    stop("`mtp` must inherit from `MTP`.")
   }
-  LMTPPolicySequence$new(policies)
-}
+  if (length(tau) != 1L || !is.numeric(tau) || tau < 1) {
+    stop("`tau` must be a positive integer.")
+  }
 
+  LMTPPolicySequence$new(
+    policies = rep(list(mtp), as.integer(tau)),
+    name = name %||% paste0("repeat(", mtp$name, ")")
+  )
+}
 
 

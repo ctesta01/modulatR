@@ -95,16 +95,20 @@ one_rep <- function(n = 2000, delta = 1) {
     learners_g = nadir::lnr_glm_density,
     policy_seq = policy_seq,
     A_type = "continuous",
-    g_mode = "density"
+    g_mode = "density",
+    cross_fit = FALSE,
+    V = 2
   )
-
+  
   nf_identity <- LMTPNuisanceFactory$new(
     learners_g = nadir::lnr_glm_density,
     policy_seq = identity_seq,
     A_type = "continuous",
-    g_mode = "density"
+    g_mode = "density",
+    cross_fit = FALSE,
+    V = 2
   )
-
+  
   fluct <- LMTPFluctuationSubmodel$new(
     family = stats::gaussian()
   )
@@ -144,8 +148,8 @@ one_rep <- function(n = 2000, delta = 1) {
 ```
 
 ```{r}
-B <- 300
-sim_res <- suppressMessages(replicate(B, one_rep(n = 20, delta = 1)))
+B <- 200
+sim_res <- suppressMessages(replicate(B, one_rep(n = 2000, delta = 1)))
 sim_res <- t(sim_res)
 sim_res <- as.data.frame(sim_res)
 
@@ -399,14 +403,18 @@ one_rep_compare <- function(n = 2000,
     learners_g = nadir::lnr_glm_density,
     policy_seq = policy_seq,
     A_type = "continuous",
-    g_mode = "density"
+    g_mode = "density",
+    cross_fit = TRUE,
+    V = 2
   )
 
   nf_identity <- LMTPNuisanceFactory$new(
     learners_g = nadir::lnr_glm_density,
     policy_seq = identity_seq,
     A_type = "continuous",
-    g_mode = "density"
+    g_mode = "density",
+    cross_fit = TRUE,
+    V = 2
   )
 
   fluct <- LMTPFluctuationSubmodel$new(
@@ -481,9 +489,7 @@ sim_sl <- replicate(
 
 sim_glm <- as.data.frame(t(sim_glm))
 sim_sl <- as.data.frame(t(sim_sl))
-```
 
-```{r}
 summarize_sim <- function(res, truth) {
   data.frame(
     mc_mean = mean(res$estimate),

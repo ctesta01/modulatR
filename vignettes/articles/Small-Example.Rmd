@@ -25,13 +25,9 @@ n <- 300
 # ------------------------------------------------------------------
 W1 <- rnorm(n)
 L1 <- rnorm(n, mean = 0.4 * W1)
-
 A1 <- rbinom(n, 1, plogis(0.5 * W1 - 0.7 * L1))
-
 L2 <- rnorm(n, mean = 0.3 * W1 + 0.8 * A1 + 0.4 * L1)
-
 A2 <- rbinom(n, 1, plogis(-0.2 * W1 + 0.9 * L2))
-
 Y <- rbinom(n, 1, plogis(-0.3 + 0.4 * W1 + 0.6 * A1 + 0.9 * A2 + 0.5 * L2))
 
 df <- data.frame(

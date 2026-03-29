@@ -1,6 +1,6 @@
-# core runner: scalar E[Y^d] -------------------------------------------------
+# core runner: E[Y^d] -------------------------------------------------
 
-#' Run a scalar TMLE for an LMTP mean
+#' Estimate a scalar TMLE for an LMTP mean
 #'
 #' @param ds An `LMTPData` object.
 #' @param policy_seq An `LMTPPolicySequence`.
@@ -21,13 +21,23 @@ run_tmle_for_LMTP <- function(ds,
                               fml_Q = NULL,
                               learners_Q_extra_args = NULL,
                               alpha = 0.05) {
-  if (!inherits(ds, "LMTPData")) stop("`ds` must inherit from `LMTPData`.")
-  if (!inherits(policy_seq, "LMTPPolicySequence")) stop("`policy_seq` must inherit from `LMTPPolicySequence`.")
-  if (!inherits(nuisance_factory, "LMTPNuisanceFactory")) stop("`nuisance_factory` must inherit from `LMTPNuisanceFactory`.")
-  if (!inherits(fluctuation, "LMTPFluctuationSubmodel")) stop("`fluctuation` must inherit from `LMTPFluctuationSubmodel`.")
+  if (!inherits(ds, "LMTPData")) {
+    stop("`ds` must inherit from `LMTPData`.")
+  }
+  if (!inherits(policy_seq, "LMTPPolicySequence")) {
+    stop("`policy_seq` must inherit from `LMTPPolicySequence`.")
+  }
+  if (!inherits(nuisance_factory, "LMTPNuisanceFactory")) {
+    stop("`nuisance_factory` must inherit from `LMTPNuisanceFactory`.")
+  }
+  if (!inherits(fluctuation, "LMTPFluctuationSubmodel")) {
+    stop("`fluctuation` must inherit from `LMTPFluctuationSubmodel`.")
+  }
 
+  policy_seq$validate_against_data(ds)
   nuisance_factory$train(ds)
   kprov <- nuisance_factory$k_provider(ds)
+
   tau <- ds$tau()
 
   q_fit_factory <- nuisance_factory$q_trainer(
@@ -43,12 +53,44 @@ run_tmle_for_LMTP <- function(ds,
 
   target_next <- ds$Y()
 
+  # Backward shifted recursion
   for (t in rev(seq_len(tau))) {
-    Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next)
-    Qvec_t <- Q0_t(ds$A(t), ds$H(t))
+    A_t <- ds$A(t)
+    H_t <- ds$H(t)
+    A_t_star <- policy_seq$apply_t(t, A_t, H_t)
+
+    if (isTRUE(nuisance_factory$cross_fit)) {
+      stop(
+        "`run_tmle_for_LMTP()` currently requires `cross_fit = FALSE` ",
+        "because the fluctuation wrapper needs evaluation-time `r_t` functions, ",
+        "and those are not yet retained in the cross-fitted nuisance factory."
+      )
+    } else {
+      Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next)
+      Qvec_t <- Q0_t(A_t, H_t)
+    }
 
     H_obs_t <- kprov$K_obs(t)
-    H_fun_t <- .make_scalar_H_fun(kprov, t)
+
+    K_prev_obs <- if (t == 1L) {
+      rep(1, ds$n)
+    } else {
+      kprov$K_obs(t - 1L)
+    }
+
+    r_t_fun <- nuisance_factory$r_list[[t]]
+    if (is.null(r_t_fun) || !is.function(r_t_fun)) {
+      stop("`r_t_fun` is NULL or not a function at time t = ", t, ".")
+    }
+
+    H_fun_t <- local({
+      K_prev_obs_local <- K_prev_obs
+      r_t_fun_local <- r_t_fun
+
+      function(A_vec, H_df) {
+        K_prev_obs_local * r_t_fun_local(A_vec, H_df)
+      }
+    })
 
     up <- fluctuation$fit_update(
       Q0_fun_t = Q0_t,
@@ -65,28 +107,42 @@ run_tmle_for_LMTP <- function(ds,
     intercept[[t]] <- up$intercept
 
     if (t > 1L) {
-      A_t_star <- policy_seq$apply_t(t, ds$A(t), ds$H(t))
-      target_next <- Q_star[[t]](A_t_star, ds$H(t))
+      target_next <- Q_star[[t]](A_t_star, H_t)
     }
   }
 
+  # Plug-in estimate
   A1_star <- policy_seq$apply_t(1, ds$A(1), ds$H(1))
   psi <- mean(Q_star[[1]](A1_star, ds$H(1)))
 
+  # EIF matching the parameterization:
+  #
+  # for t < tau:
+  #   K_t { Q_{t+1}(A_{t+1}^*, H_{t+1}) - Q_t(A_t, H_t) }
+  #
+  # for t = tau:
+  #   K_tau { Y - Q_tau(A_tau, H_tau) }
+  #
+  # plus plug-in term:
+  #   Q_1(A_1^*, H_1) - psi
   ic <- rep(0, ds$n)
+
   for (t in seq_len(tau)) {
-    A_t_star <- policy_seq$apply_t(t, ds$A(t), ds$H(t))
-    Q_t_star <- Q_star[[t]](A_t_star, ds$H(t))
+    K_t <- kprov$K_obs(t)
 
     if (t < tau) {
       A_next_star <- policy_seq$apply_t(t + 1L, ds$A(t + 1L), ds$H(t + 1L))
-      Q_next_star <- Q_star[[t + 1L]](A_next_star, ds$H(t + 1L))
-    } else {
-      Q_next_star <- ds$Y()
-    }
 
-    ic <- ic + kprov$K_obs(t) * (Q_next_star - Q_t_star)
+      Q_next_shift <- Q_star[[t + 1L]](A_next_star, ds$H(t + 1L))
+      Q_t_obs <- Q_star[[t]](ds$A(t), ds$H(t))
+
+      ic <- ic + K_t * (Q_next_shift - Q_t_obs)
+    } else {
+      Q_t_obs <- Q_star[[t]](ds$A(t), ds$H(t))
+      ic <- ic + K_t * (ds$Y() - Q_t_obs)
+    }
   }
+
   ic <- ic + Q_star[[1]](A1_star, ds$H(1)) - psi
 
   var_hat <- stats::var(ic) / ds$n
@@ -143,7 +199,34 @@ run_subgroup_LMTP_TMLE <- function(ds,
   if (!inherits(nuisance_factory, "LMTPNuisanceFactory")) stop("`nuisance_factory` must inherit from `LMTPNuisanceFactory`.")
   if (!inherits(fluctuation, "LMTPFluctuationSubmodel")) stop("`fluctuation` must inherit from `LMTPFluctuationSubmodel`.")
 
+  policy_seq$validate_against_data(ds)
+
+  if (isTRUE(nuisance_factory$cross_fit)) {
+    stop(
+      "`run_subgroup_LMTP_TMLE()` currently requires `cross_fit = FALSE` ",
+      "until the subgroup fluctuation path is fully implemented for cross-fitting."
+    )
+  }
+
   subgroup_mat <- .make_subgroup_matrix(ds, subgroup_funs)
+
+  if (nrow(subgroup_mat) != ds$n) {
+    stop("`subgroup_funs` must return vectors of length `ds$n`.")
+  }
+  if (!all(vapply(subgroup_mat, function(x) all(is.finite(x)), logical(1)))) {
+    stop("Subgroup indicators must be finite.")
+  }
+  if (!all(vapply(subgroup_mat, function(x) all(x %in% c(0, 1)), logical(1)))) {
+    stop("Each subgroup function must return a 0/1 indicator.")
+  }
+
+  pA <- colMeans(subgroup_mat)
+  if (any(pA <= 0)) {
+    bad <- colnames(subgroup_mat)[pA <= 0]
+    stop("The following subgroup(s) have zero empirical prevalence: ",
+         paste(bad, collapse = ", "))
+  }
+
   subgroup_names <- colnames(subgroup_mat)
   n_groups <- ncol(subgroup_mat)
 

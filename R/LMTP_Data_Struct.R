@@ -1,3 +1,5 @@
+# LMTPData R6 Class Definition -------------------------------------------------
+
 #' Longitudinal data object for LMTP analyses
 #'
 #' @description
@@ -110,7 +112,6 @@ LMTPData <- R6::R6Class(
           )
         }
         private$.data[[auto_id]] <- seq_len(nrow(private$.data))
-        message("`id_col` was NULL; using `", auto_id, "` = 1:nrow(data).")
         id_col <- auto_id
       }
 
@@ -358,3 +359,21 @@ LMTPData <- R6::R6Class(
     }
   )
 )
+
+
+
+# helpers -----------------------------------------------------------------
+
+#' Subset a data frame based on the IDs given
+#'
+.subset_ds <- function(ds, idx) {
+  LMTPData$new(
+    data = ds$df[idx, , drop = FALSE],
+    id_col = ds$id_col,
+    A_cols = ds$A_cols,
+    L_cols = ds$L_cols,
+    W_cols = ds$W_cols,
+    Y_col = ds$Y_col,
+    metadata = ds$metadata
+  )
+}

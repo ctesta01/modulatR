@@ -74,6 +74,30 @@
 #'
 #' A_star <- mtp_flip$apply_policy(A_bin, H)
 #' head(cbind(A_bin, A_star))
+#'
+#' ## -------------------------------------------------
+#' ## Discrete MTP 2: decrement non-negative integer treatment
+#' ## -------------------------------------------------
+#'
+#' A_pois <- rpois(n, 2)
+#'
+#' mtp_decrement <- MTP$new(
+#'   treatment_type = "discrete",
+#'   region_predicates = list(
+#'     function(A, H) A > 0,
+#'     function(A, H) A == 0
+#'   ),
+#'   policy_pieces = list(
+#'     function(A, H) A - 1,
+#'     function(A, H) A
+#'   ),
+#'   name = "decrement_integer"
+#' )
+#'
+#' mtp_decrement
+#'
+#' A_star <- mtp_decrement$apply_policy(A_pois, H)
+#' head(cbind(A_pois, A_star))
 MTP <- R6::R6Class(
   "MTP",
   public = list(

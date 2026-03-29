@@ -14,7 +14,7 @@ knitr::opts_chunk$set(
   fig.width = 7,
   fig.height = 4.5
 )
-set.seed(2025)
+set.seed(2026)
 library(modulatR)
 library(TargetedLearning)
 ```

@@ -89,3 +89,63 @@ identity_policy <- function(A_type = c("continuous", "discrete"),
   sweep(subgroup_mat, 2, pA, "/") * k_provider$K_obs(t)
 }
 
+
+#' Folds for Cross-Fitting Nuisance Function
+.make_folds <- function(n, V = 5, fold_id = NULL, seed = NULL) {
+  if (!is.null(fold_id)) {
+    if (length(fold_id) != n) stop("`fold_id` must have length n.")
+    if (!all(fold_id %in% seq_len(max(fold_id)))) {
+      stop("`fold_id` must contain positive integer fold labels.")
+    }
+    return(as.integer(fold_id))
+  }
+
+  if (!is.null(seed)) set.seed(seed)
+  sample(rep(seq_len(V), length.out = n))
+}
+
+
+# -------------------------------------------------------------------------
+
+.fit_Q_crossfit <- function(ds,
+                            t,
+                            pseudo_outcome_vec,
+                            q_fit_factory,
+                            fold_id) {
+  if (!inherits(ds, "LMTPData")) {
+    stop("`ds` must inherit from `LMTPData`.")
+  }
+
+  n <- ds$n
+  preds_oof <- rep(NA_real_, n)
+
+  for (v in sort(unique(fold_id))) {
+    train_idx <- which(fold_id != v)
+    valid_idx <- which(fold_id == v)
+
+    ds_tr <- .subset_ds(ds, train_idx)
+
+    Q_tr <- q_fit_factory(
+      ds_tr,
+      t = t,
+      pseudo_outcome_vec = pseudo_outcome_vec[train_idx]
+    )
+
+    preds_oof[valid_idx] <- Q_tr(
+      ds$A(t)[valid_idx],
+      ds$H(t)[valid_idx, , drop = FALSE]
+    )
+  }
+
+  # Full-data fit retained for evaluation at arbitrary (A, H)
+  Q_full <- q_fit_factory(
+    ds,
+    t = t,
+    pseudo_outcome_vec = pseudo_outcome_vec
+  )
+
+  list(
+    observed = preds_oof,
+    eval = function(A_vec, H_df) Q_full(A_vec, H_df)
+  )
+}

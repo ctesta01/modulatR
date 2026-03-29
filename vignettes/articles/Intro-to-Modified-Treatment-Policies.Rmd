@@ -38,7 +38,7 @@ distribution. Consider the policy
 
 $$
 d(A, L) = \begin{cases}
-a - 5, & a \geq 5, 
+a - 5, & a \geq 5, \\
 a, & a < 5.
 \end{cases}
 $$
@@ -137,12 +137,14 @@ density_df <- rbind(
 )
 
 ggplot(density_df, aes(x = x, y = density, linetype = which, group = which)) +
-  geom_line() +
+  geom_line(linewidth = 1) +
   labs(
     title = "Observed density and post-policy density",
     x = "Treatment value",
-    y = "Density"
+    y = "Density",
+    linetype = "Distribution"
   ) +
-  scale_linetype_manual(values = c('dashed', 'solid')) + 
-  theme_minimal()
+  scale_linetype_manual(values = c('solid', 'dotdash')) + 
+  theme_minimal() + 
+  xlim(c(0, 10))
 ```

@@ -1,0 +1,273 @@
+---
+title: "Asymptotics Visualization for Longitudinal TMLE under an LMTP"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(modulatR)
+library(TargetedLearning)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(purrr)
+library(scales)
+
+theme_set(theme_minimal(base_size = 13))
+set.seed(2026)
+```
+
+Simulation setup
+
+```{r}
+true_diff <- 2.49
+
+generate_data <- function(n) {
+  W  <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  data.frame(W = W, L1 = L1, A1 = A1, L2 = L2, A2 = A2, Y = Y)
+}
+
+make_ds <- function(df) {
+  LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+}
+
+make_nuisance <- function(policy_seq) {
+  LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = policy_seq,
+    A_type = "continuous",
+    g_mode = "density",
+    cross_fit = FALSE
+  )
+}
+
+make_fluctuation <- function() {
+  LMTPFluctuationSubmodel$new(
+    family = stats::gaussian(),
+    use_intercept = FALSE
+  )
+}
+```
+
+```{r}
+# to determine truth: 
+n <- 1e6
+W <- rnorm(n)
+eL1 <- rnorm(n)
+eA1 <- rnorm(n)
+eL2 <- rnorm(n)
+eA2 <- rnorm(n)
+eY  <- rnorm(n)
+
+L1 <- 0.5 * W + eL1
+A1 <- 0.6 * W + 0.8 * L1 + eA1
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + eL2
+A2 <- 0.3 * W + 0.5 * L2 + eA2
+Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + eY
+
+A1d <- A1 + 1
+L2d <- 0.4 * W + 0.7 * A1d + 0.6 * L1 + eL2
+A2d <- (0.3 * W + 0.5 * L2d + eA2) + 1
+Yd  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2d + 1.2 * A1d + 0.8 * A2d + eY
+
+true_diff <- mean(Yd - Y)
+
+
+
+# dgp 
+
+generate_data <- function(n) {
+  W  <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  data.frame(W = W, L1 = L1, A1 = A1, L2 = L2, A2 = A2, Y = Y)
+}
+
+make_ds <- function(df) {
+  LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+}
+
+make_nuisance <- function(policy_seq) {
+  LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = policy_seq,
+    A_type = "continuous",
+    g_mode = "density",
+    cross_fit = FALSE
+  )
+}
+
+make_fluctuation <- function() {
+  LMTPFluctuationSubmodel$new(
+    family = stats::gaussian(),
+    use_intercept = FALSE
+  )
+}
+```
+
+
+One replicate of the simulation:
+
+```{r}
+one_rep <- function(n) {
+  df <- generate_data(n)
+  ds <- make_ds(df)
+
+  policy_seq <- repeat_policy_over_time(
+    mtp_additive_shift(delta = 1),
+    tau = ds$tau()
+  )
+
+  identity_seq <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+  nf_shift <- make_nuisance(policy_seq)
+  nf_identity <- make_nuisance(identity_seq)
+  fluct <- make_fluctuation()
+
+  fit_shift <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = policy_seq,
+    nuisance_factory = nf_shift,
+    fluctuation = fluct,
+    learners_Q = stats::glm
+  )$run()
+
+  fit_identity <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = identity_seq,
+    nuisance_factory = nf_identity,
+    fluctuation = fluct,
+    learners_Q = stats::glm
+  )$run()
+
+  fit_diff <- lmtp_delta_contrast(
+    fit1 = fit_shift,
+    fit0 = fit_identity,
+    transform = "difference"
+  )
+
+  tibble(
+    estimate = fit_diff$estimate,
+    se = fit_diff$se,
+    ci_lower = fit_diff$ci["lower"],
+    ci_upper = fit_diff$ci["upper"],
+    covered = as.numeric(fit_diff$ci["lower"] <= true_diff &&
+                           true_diff <= fit_diff$ci["upper"])
+  )
+}
+```
+
+
+Monte Carlo grid:
+
+```{r}
+run_grid <- function(n, B = 200) {
+  reps <- map_dfr(seq_len(B), ~ one_rep(n))
+
+  tibble(
+    n = n,
+    B = B,
+    mc_mean = mean(reps$estimate),
+    bias = mean(reps$estimate) - true_diff,
+    empirical_sd = sd(reps$estimate),
+    mean_estimated_se = mean(reps$se),
+    coverage_95 = mean(reps$covered),
+    se_to_sd_ratio = mean(reps$se) / sd(reps$estimate)
+  )
+}
+
+# n_grid <- c(1000, 2500, 5000, 10000, 20000, 50000)
+n_grid <- round(cumsum(rep(sqrt(300), 8))^2, 0)
+
+sim_summary <- map_dfr(n_grid, run_grid, B = 250)
+sim_summary
+```
+
+Visualization
+
+```{r}
+p_bias <- ggplot(sim_summary, aes(x = n, y = bias)) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = n_grid) +
+  labs(
+    title = "Bias across sample size",
+    x = "n",
+    y = "Monte Carlo bias"
+  )
+
+sd_df <- sim_summary %>%
+  select(n, empirical_sd, mean_estimated_se) %>%
+  pivot_longer(cols = c(empirical_sd, mean_estimated_se),
+               names_to = "quantity", values_to = "value")
+
+p_sd <- ggplot(sd_df, aes(x = n, y = value, group = quantity, linetype = quantity)) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = n_grid) +
+  labs(
+    title = "Empirical SD vs mean estimated SE",
+    x = "n",
+    y = "Value",
+    linetype = NULL
+  )
+
+p_cov <- ggplot(sim_summary, aes(x = n, y = coverage_95)) +
+  geom_hline(yintercept = 0.95, linetype = 2) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = n_grid) +
+  scale_y_continuous(labels = percent_format(accuracy = 1), limits = c(0.8, 1.0)) +
+  labs(
+    title = "95% CI coverage",
+    x = "n",
+    y = "Coverage"
+  )
+
+p_ratio <- ggplot(sim_summary, aes(x = n, y = se_to_sd_ratio)) +
+  geom_hline(yintercept = 1, linetype = 2) +
+  geom_line() +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = n_grid) +
+  labs(
+    title = "Mean estimated SE / empirical SD",
+    x = "n",
+    y = "Ratio"
+  )
+
+p_bias
+p_sd
+p_cov
+p_ratio
+```

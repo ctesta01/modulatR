@@ -1,0 +1,195 @@
+---
+title: "Asymptotics-Visualization"
+output: html_document
+---
+
+```{r}
+devtools::load_all(".")
+library(TargetedLearning)
+
+# true contrast is 2.49 for this DGP
+true_diff <- 2.49
+
+one_rep <- function(n, fold_V = 2) {
+  W  <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  df <- data.frame(W = W, L1 = L1, A1 = A1, L2 = L2, A2 = A2, Y = Y)
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  fold_id <- sample(rep(seq_len(fold_V), length.out = ds$n))
+
+  policy_seq <- repeat_policy_over_time(
+    mtp_additive_shift(delta = 1),
+    tau = ds$tau()
+  )
+
+  identity_seq <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+  nf_shift <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = policy_seq,
+    A_type = "continuous",
+    g_mode = "density",
+    cross_fit = FALSE,
+    V = fold_V,
+    fold_id = fold_id
+  )
+
+  nf_identity <- LMTPNuisanceFactory$new(
+    learners_g = nadir::lnr_glm_density,
+    policy_seq = identity_seq,
+    A_type = "continuous",
+    g_mode = "density",
+    cross_fit = FALSE,
+    V = fold_V,
+    fold_id = fold_id
+  )
+
+  fluct <- LMTPFluctuationSubmodel$new(
+    family = stats::gaussian(),
+    use_intercept = FALSE
+  )
+
+  fit_shift <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = policy_seq,
+    nuisance_factory = nf_shift,
+    fluctuation = fluct,
+    learners_Q = stats::glm
+  )$run()
+
+  fit_identity <- make_lmtp_tl_task(
+    ds = ds,
+    policy_seq = identity_seq,
+    nuisance_factory = nf_identity,
+    fluctuation = fluct,
+    learners_Q = stats::glm
+  )$run()
+
+  fit_diff <- lmtp_delta_contrast(
+    fit1 = fit_shift,
+    fit0 = fit_identity,
+    transform = "difference"
+  )
+
+  c(
+    estimate = fit_diff$estimate,
+    se = fit_diff$se,
+    covered = as.numeric(
+      fit_diff$ci["lower"] <= true_diff && true_diff <= fit_diff$ci["upper"]
+    )
+  )
+}
+
+run_grid <- function(n, B = 100, fold_V = 2) {
+  out <- replicate(B, one_rep(n = n, fold_V = fold_V))
+  out <- as.data.frame(t(out))
+
+  data.frame(
+    n = n,
+    B = B,
+    mc_mean = mean(out$estimate),
+    bias = mean(out$estimate) - true_diff,
+    empirical_sd = stats::sd(out$estimate),
+    mean_estimated_se = mean(out$se),
+    coverage_95 = mean(out$covered)
+  )
+}
+
+set.seed(2026)
+
+sim_summary <- do.call(
+  rbind,
+  lapply(c(500, 1000, 2000, 4000), run_grid, B = 100, fold_V = 2)
+)
+
+sim_summary
+```
+
+
+
+
+
+
+### 
+
+
+
+
+```{r}
+n <- 5000
+
+W  <- rnorm(n)
+  L1 <- 0.5 * W + rnorm(n)
+  A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+  A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+  Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+  df <- data.frame(W = W, L1 = L1, A1 = A1, L2 = L2, A2 = A2, Y = Y)
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = c("A1", "A2"),
+    L_cols = list("L1", "L2"),
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  # fold_id <- sample(rep(seq_len(fold_V), length.out = ds$n))
+
+  policy_seq <- repeat_policy_over_time(
+    mtp_additive_shift(delta = 1),
+    tau = ds$tau()
+  )
+
+  identity_seq <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+nf_shift <- LMTPNuisanceFactory$new(
+  learners_g = nadir::lnr_glm_density,
+  policy_seq = policy_seq,
+  A_type = "continuous",
+  g_mode = "density",
+  cross_fit = FALSE
+)
+
+nf_identity <- LMTPNuisanceFactory$new(
+  learners_g = nadir::lnr_glm_density,
+  policy_seq = identity_seq,
+  A_type = "continuous",
+  g_mode = "density",
+  cross_fit = FALSE
+)
+  fluctuation <- LMTPFluctuationSubmodel$new(
+    family = stats::gaussian(),
+    use_intercept = TRUE
+  )
+  
+fit <- run_tmle_for_LMTP(
+  ds = ds,
+  policy_seq = policy_seq,
+  nuisance_factory = nf_shift,
+  fluctuation = fluctuation,
+  learners_Q = stats::glm
+)
+
+fit
+```

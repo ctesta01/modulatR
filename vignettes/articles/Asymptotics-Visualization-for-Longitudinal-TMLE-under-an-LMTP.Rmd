@@ -10,7 +10,8 @@ knitr::opts_chunk$set(
 ```
 
 ```{r setup}
-library(modulatR)
+# library(modulatR)
+devtools::load_all(".")
 library(TargetedLearning)
 library(dplyr)
 library(tidyr)
@@ -207,9 +208,9 @@ run_grid <- function(n, B = 200) {
 }
 
 # n_grid <- c(1000, 2500, 5000, 10000, 20000, 50000)
-n_grid <- round(cumsum(rep(sqrt(300), 8))^2, 0)
+n_grid <- round(cumsum(rep(sqrt(300), 6))^2, 0)
 
-sim_summary <- map_dfr(n_grid, run_grid, B = 250)
+sim_summary <- map_dfr(n_grid, run_grid, B = 3000)
 sim_summary
 ```
 

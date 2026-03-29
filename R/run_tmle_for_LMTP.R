@@ -46,37 +46,48 @@ run_tmle_for_LMTP <- function(ds,
     learners_Q_extra_args = learners_Q_extra_args
   )
 
+  # start of backward recursions --------------------------------------------
+
   Q_init <- vector("list", tau)
   Q_star <- vector("list", tau)
   eps <- vector("list", tau)
   intercept <- vector("list", tau)
 
-  target_next <- ds$Y()
+  # -----------------------------
+  # Track 1: untargeted recursion
+  # -----------------------------
+  target_next_init <- ds$Y()
 
-  # Backward shifted recursion
   for (t in rev(seq_len(tau))) {
     A_t <- ds$A(t)
     H_t <- ds$H(t)
     A_t_star <- policy_seq$apply_t(t, A_t, H_t)
 
-    if (isTRUE(nuisance_factory$cross_fit)) {
-      stop(
-        "`run_tmle_for_LMTP()` currently requires `cross_fit = FALSE` ",
-        "because the fluctuation wrapper needs evaluation-time `r_t` functions, ",
-        "and those are not yet retained in the cross-fitted nuisance factory."
-      )
-    } else {
-      Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next)
-      Qvec_t <- Q0_t(A_t, H_t)
+    Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next_init)
+
+    Q_init[[t]] <- Q0_t
+
+    if (t > 1L) {
+      target_next_init <- Q_init[[t]](A_t_star, H_t)
     }
+  }
+
+  # ----------------------------------------
+  # Track 2: targeted recursion for TMLE psi
+  # ----------------------------------------
+  target_next_star <- ds$Y()
+
+  for (t in rev(seq_len(tau))) {
+    A_t <- ds$A(t)
+    H_t <- ds$H(t)
+    A_t_star <- policy_seq$apply_t(t, A_t, H_t)
+
+    Q0_t <- Q_init[[t]]
+    Qvec_t <- Q0_t(A_t, H_t)
 
     H_obs_t <- kprov$K_obs(t)
 
-    K_prev_obs <- if (t == 1L) {
-      rep(1, ds$n)
-    } else {
-      kprov$K_obs(t - 1L)
-    }
+    K_prev_obs <- if (t == 1L) rep(1, ds$n) else kprov$K_obs(t - 1L)
 
     r_t_fun <- nuisance_factory$r_list[[t]]
     if (is.null(r_t_fun) || !is.function(r_t_fun)) {
@@ -86,7 +97,6 @@ run_tmle_for_LMTP <- function(ds,
     H_fun_t <- local({
       K_prev_obs_local <- K_prev_obs
       r_t_fun_local <- r_t_fun
-
       function(A_vec, H_df) {
         K_prev_obs_local * r_t_fun_local(A_vec, H_df)
       }
@@ -95,36 +105,37 @@ run_tmle_for_LMTP <- function(ds,
     up <- fluctuation$fit_update(
       Q0_fun_t = Q0_t,
       Qvec = Qvec_t,
-      target_vec = target_next,
+      target_vec = target_next_star,
       H_obs = H_obs_t,
       H_fun_t = H_fun_t,
       t = t
     )
 
-    Q_init[[t]] <- Q0_t
     Q_star[[t]] <- up$wrap
     eps[[t]] <- up$epsilon
     intercept[[t]] <- up$intercept
 
     if (t > 1L) {
-      target_next <- Q_star[[t]](A_t_star, H_t)
+      target_next_star <- Q_star[[t]](A_t_star, H_t)
     }
   }
 
   # Plug-in estimate
   A1_star <- policy_seq$apply_t(1, ds$A(1), ds$H(1))
-  psi <- mean(Q_star[[1]](A1_star, ds$H(1)))
+
+  psi_tmle <- mean(Q_star[[1]](A1_star, ds$H(1)))
+  psi_plugin_init <- mean(Q_init[[1]](A1_star, ds$H(1)))
 
   # EIF matching the parameterization:
   #
   # for t < tau:
-  #   K_t { Q_{t+1}(A_{t+1}^*, H_{t+1}) - Q_t(A_t, H_t) }
+  #   K_t { Q_{t+1}(A_{t+1}^d, H_{t+1}) - Q_t(A_t, H_t) }
   #
   # for t = tau:
   #   K_tau { Y - Q_tau(A_tau, H_tau) }
   #
   # plus plug-in term:
-  #   Q_1(A_1^*, H_1) - psi
+  #   Q_1(A_1^d, H_1) - psi
   ic <- rep(0, ds$n)
 
   for (t in seq_len(tau)) {
@@ -133,24 +144,24 @@ run_tmle_for_LMTP <- function(ds,
     if (t < tau) {
       A_next_star <- policy_seq$apply_t(t + 1L, ds$A(t + 1L), ds$H(t + 1L))
 
-      Q_next_shift <- Q_star[[t + 1L]](A_next_star, ds$H(t + 1L))
-      Q_t_obs <- Q_star[[t]](ds$A(t), ds$H(t))
+      Q_next_init_shift <- Q_init[[t + 1L]](A_next_star, ds$H(t + 1L))
+      Q_t_init_obs <- Q_init[[t]](ds$A(t), ds$H(t))
 
-      ic <- ic + K_t * (Q_next_shift - Q_t_obs)
+      ic <- ic + K_t * (Q_next_init_shift - Q_t_init_obs)
     } else {
-      Q_t_obs <- Q_star[[t]](ds$A(t), ds$H(t))
-      ic <- ic + K_t * (ds$Y() - Q_t_obs)
+      Q_t_init_obs <- Q_init[[t]](ds$A(t), ds$H(t))
+      ic <- ic + K_t * (ds$Y() - Q_t_init_obs)
     }
   }
 
-  ic <- ic + Q_star[[1]](A1_star, ds$H(1)) - psi
+  ic <- ic + Q_init[[1]](A1_star, ds$H(1)) - psi_plugin_init
 
   var_hat <- stats::var(ic) / ds$n
   se_hat <- sqrt(var_hat)
-  ci_hat <- .wald_ci(psi, se_hat, alpha = alpha)
+  ci_hat <- .wald_ci(psi_tmle, se_hat, alpha = alpha)
 
   LMTPFit$new(
-    estimate = psi,
+    estimate = psi_tmle,
     var = var_hat,
     se = se_hat,
     ci = ci_hat,

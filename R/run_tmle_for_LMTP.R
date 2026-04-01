@@ -56,19 +56,19 @@ run_tmle_for_LMTP <- function(ds,
   # -----------------------------
   # Track 1: untargeted recursion
   # -----------------------------
-  target_next_init <- ds$Y()
+  target_next <- ds$Y()
 
   for (t in rev(seq_len(tau))) {
     A_t <- ds$A(t)
     H_t <- ds$H(t)
     A_t_star <- policy_seq$apply_t(t, A_t, H_t)
 
-    Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next_init)
+    Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next)
 
     Q_init[[t]] <- Q0_t
 
     if (t > 1L) {
-      target_next_init <- Q_init[[t]](A_t_star, H_t)
+      target_next <- Q_init[[t]](A_t_star, H_t)
     }
   }
 
@@ -179,7 +179,7 @@ run_tmle_for_LMTP <- function(ds,
   )
 }
 
-# subgroup runner -------------------------------------------------------------
+# run_subgroup_tmle_for_LMTP -------------------------------------------------------------
 
 #' Run a simultaneous subgroup TMLE for LMTP subgroup means
 #'
@@ -196,7 +196,7 @@ run_tmle_for_LMTP <- function(ds,
 #'
 #' @return An `LMTPFit` with vector estimate and EIF matrix.
 #' @export
-run_subgroup_LMTP_TMLE <- function(ds,
+run_subgroup_tmle_for_LMTP <- function(ds,
                                    policy_seq,
                                    nuisance_factory,
                                    fluctuation,
@@ -251,84 +251,133 @@ run_subgroup_LMTP_TMLE <- function(ds,
     learners_Q_extra_args = learners_Q_extra_args
   )
 
+  # sequential backwards regressions -----------------------------------------
+
   Q_init <- vector("list", tau)
   Q_star <- vector("list", tau)
   eps <- vector("list", tau)
   intercept <- vector("list", tau)
 
+  # --------------------------------
+  # Track 1: untargeted Q recursion
+  # --------------------------------
   target_next <- ds$Y()
 
   for (t in rev(seq_len(tau))) {
+    H_t <- ds$H(t)
+    A_t <- ds$A(t)
+    A_t_star <- policy_seq$apply_t(t, A_t, H_t)
+
     Q0_t <- q_fit_factory(ds, t = t, pseudo_outcome_vec = target_next)
-    Qvec_t <- Q0_t(ds$A(t), ds$H(t))
+    Q_init[[t]] <- Q0_t
+
+    if (t > 1L) {
+      target_next <- Q_init[[t]](A_t_star, H_t)
+    }
+  }
+
+  # --------------------------------
+  # Track 2: targeted Q recursion
+  # --------------------------------
+  target_next_star <- ds$Y()
+
+  for (t in rev(seq_len(tau))) {
+    H_t <- ds$H(t)
+    A_t <- ds$A(t)
+    A_t_star <- policy_seq$apply_t(t, A_t, H_t)
+
+    Q0_t <- Q_init[[t]]
+    Qvec_t <- Q0_t(A_t, H_t)
 
     H_obs_t <- .make_subgroup_H_obs(kprov, subgroup_mat, t)
 
-    # current implementation keeps observed-point subgroup H for fitting.
-    # evaluation-time subgroup H is left open for later refinement when
-    # subgroup LMTP clever covariates are fully formalized.
     H_fun_t <- function(A_vec, H_df) H_obs_t
 
     up <- fluctuation$fit_update(
       Q0_fun_t = Q0_t,
       Qvec = Qvec_t,
-      target_vec = target_next,
+      target_vec = target_next_star,
       H_obs = H_obs_t,
       H_fun_t = H_fun_t,
       t = t
     )
 
-    Q_init[[t]] <- Q0_t
     Q_star[[t]] <- up$wrap
     eps[[t]] <- up$epsilon
     intercept[[t]] <- up$intercept
 
     if (t > 1L) {
-      A_t_star <- policy_seq$apply_t(t, ds$A(t), ds$H(t))
-      target_next <- Q_star[[t]](A_t_star, ds$H(t))
+      target_next_star <- Q_star[[t]](A_t_star, H_t)
     }
   }
 
   A1_star <- policy_seq$apply_t(1, ds$A(1), ds$H(1))
-  Q1_star <- Q_star[[1]](A1_star, ds$H(1))
+
+  Q1_star_shift <- Q_star[[1]](A1_star, ds$H(1))
+  Q1_init_shift <- Q_init[[1]](A1_star, ds$H(1))
+
+  weights_subgroup <- sweep(subgroup_mat, 2, pA, "/")
+
+  psi_tmle <- colMeans(weights_subgroup * Q1_star_shift)
+  psi_plugin_init <- colMeans(weights_subgroup * Q1_init_shift)
+
+  # eif construction --------------------------------------------------------
 
   pA <- pmax(colMeans(subgroup_mat), 1e-8)
-  psi <- colMeans(sweep(subgroup_mat, 2, pA, "/") * Q1_star)
 
   eif <- matrix(0, nrow = ds$n, ncol = n_groups)
   colnames(eif) <- subgroup_names
 
-  base_ic <- rep(0, ds$n)
+  ic <- rep(0, ds$n)
+  ic_star <- rep(0, ds$n)
+
   for (t in seq_len(tau)) {
-    A_t_star <- policy_seq$apply_t(t, ds$A(t), ds$H(t))
-    Q_t_star <- Q_star[[t]](A_t_star, ds$H(t))
+    K_t <- kprov$K_obs(t)
 
     if (t < tau) {
-      A_next_star <- policy_seq$apply_t(t + 1L, ds$A(t + 1L), ds$H(t + 1L))
-      Q_next_star <- Q_star[[t + 1L]](A_next_star, ds$H(t + 1L))
-    } else {
-      Q_next_star <- ds$Y()
-    }
+      H_next <- ds$H(t + 1L)
+      A_next_star <- policy_seq$apply_t(t + 1L, ds$A(t + 1L), H_next)
 
-    base_ic <- base_ic + kprov$K_obs(t) * (Q_next_star - Q_t_star)
+      Q_next_init_shift <- Q_init[[t + 1L]](A_next_star, H_next)
+      Q_t_init_obs <- Q_init[[t]](ds$A(t), ds$H(t))
+      ic <- ic + K_t * (Q_next_init_shift - Q_t_init_obs)
+
+      Q_next_star_shift <- Q_star[[t + 1L]](A_next_star, H_next)
+      Q_t_star_obs <- Q_star[[t]](ds$A(t), ds$H(t))
+      ic_star <- ic_star + K_t * (Q_next_star_shift - Q_t_star_obs)
+    } else {
+      Q_t_init_obs <- Q_init[[t]](ds$A(t), ds$H(t))
+      ic <- ic + K_t * (ds$Y() - Q_t_init_obs)
+
+      Q_t_star_obs <- Q_star[[t]](ds$A(t), ds$H(t))
+      ic_star <- ic_star + K_t * (ds$Y() - Q_t_star_obs)
+    }
   }
 
-  for (j in seq_len(n_groups)) {
-    Sj <- subgroup_mat[[j]] / pA[j]
-    eif[, j] <- Sj * base_ic + Sj * Q1_star - psi[j]
+  eif <- matrix(0, nrow = ds$n, ncol = n_groups)
+  eif_star <- matrix(0, nrow = ds$n, ncol = n_groups)
+  colnames(eif) <- subgroup_names
+  colnames(eif_star) <- subgroup_names
+
+  for (g in seq_len(n_groups)) {
+    wg <- subgroup_mat[, g] / pA[g]
+
+    eif[, g] <- wg * ic + wg * Q1_init_shift - psi_plugin_init[g]
+    eif_star[, g] <- wg * ic_star + wg * Q1_star_shift - psi_tmle[g]
   }
 
   var_hat <- apply(eif, 2, stats::var) / ds$n
   se_hat <- sqrt(var_hat)
-  ci_hat <- t(vapply(
-    seq_len(n_groups),
-    function(j) .wald_ci(psi[j], se_hat[j], alpha = alpha),
-    numeric(2)
-  ))
-  rownames(ci_hat) <- subgroup_names
+
+  ci_hat <- rbind(
+    lower = psi_tmle - stats::qnorm(1 - alpha / 2) * se_hat,
+    upper = psi_tmle + stats::qnorm(1 - alpha / 2) * se_hat
+  )
+  colnames(ci_hat) <- subgroup_names
+
 
   LMTPFit$new(
-    estimate = psi,
+    estimate = psi_tmle,
     var = var_hat,
     se = se_hat,
     ci = ci_hat,

@@ -1,0 +1,198 @@
+---
+title: "Subgroup TMLE for Longitudinal Modified Treatment Policies"
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+```{r setup}
+library(modulatR)
+library(nadir)
+library(TargetedLearning)
+```
+
+
+# Define a dataset
+
+This dataset is constructed to have effect modification according to the baseline
+variable $W$. The DGP written below (`generate_lmtp_data()`) returns not 
+only a dataset `(W, L1, A1, L2, A2, Y)` but also the column `Ystar` which is their
+counterfactual outcomes under a policy of an additive shift $d(A) = A+1$ at both
+time-steps.
+
+```{r}
+generate_lmtp_data <- function(n, delta = 1) {
+  W  <- rnorm(n, sd = 10)
+
+  eL1 <- rnorm(n)
+  eA1 <- rnorm(n)
+  eL2 <- rnorm(n)
+  eA2 <- rnorm(n)
+  eY  <- rnorm(n, sd = 5)
+
+  L1 <- 0.5 * W + eL1
+  A1 <- 0.6 * W + 0.8 * L1 + eA1
+  L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + eL2
+  A2 <- 0.3 * W + 0.5 * L2 + eA2
+
+  Y <- 1 +
+    0.5 * W +
+    0.4 * L1 +
+    0.3 * L2 +
+    1.2 * A1 +
+    0.8 * A2 +
+    0.15 * W * A1 +
+    0.10 * W * A2 +
+    eY
+
+  A1_star <- A1 + delta
+  L2_star <- 0.4 * W + 0.7 * A1_star + 0.6 * L1 + eL2
+  A2_star <- 0.3 * W + 0.5 * L2_star + eA2 + delta
+
+  Y_star <- 1 +
+    0.5 * W +
+    0.4 * L1 +
+    0.3 * L2_star +
+    1.2 * A1_star +
+    0.8 * A2_star +
+    0.15 * W * A1_star +
+    0.10 * W * A2_star +
+    eY
+
+  data.frame(
+    W = W,
+    L1 = L1,
+    A1 = A1,
+    L2 = L2,
+    A2 = A2,
+    Y = Y,
+    Y_star = Y_star
+  )
+}
+```
+
+# Approximate truth under dgp 
+
+Here our purpose is to determine and save the approximate counterfactuals
+`Ystar` so that we know if our `{modulatR}` software is working correctly or not.
+
+```{r}
+set.seed(2026)
+truth_dat <- generate_lmtp_data(1e6, delta = 1)
+
+truth_overall <- mean(truth_dat$Y_star)
+truth_w_pos   <- mean(truth_dat$Y_star[truth_dat$W > 0])
+truth_w_nonpos <- mean(truth_dat$Y_star[truth_dat$W <= 0])
+
+truth_tbl <- data.frame(
+  subgroup = c("Overall", "W > 0", "W <= 0"),
+  truth = c(truth_overall, truth_w_pos, truth_w_nonpos)
+)
+
+truth_tbl
+```
+
+# Simulation dataset
+
+```{r}
+dat <- generate_lmtp_data(1500, delta = 1)
+dat <- dat[, c("W", "L1", "A1", "L2", "A2", "Y")]
+head(dat)
+```
+
+
+# Encode data as `LMTPData`
+```{r}
+ds <- LMTPData$new(
+  data   = dat,
+  W_cols = "W",
+  L_cols = list("L1", "L2"),
+  A_cols = c("A1", "A2"),
+  Y_col  = "Y"
+)
+
+ds
+```
+
+# Define a policy 
+
+```{r}
+pol <- mtp_additive_shift(delta = 1)
+policy_seq <- repeat_policy_over_time(pol, tau = ds$tau())
+policy_seq
+```
+
+# Specify nuisance estimation and fluctuation
+
+```{r}
+nf <- LMTPNuisanceFactory$new(
+  learners_g = nadir::lnr_glm_density,
+  policy_seq = policy_seq,
+  A_type = "continuous",
+  g_mode = "density"
+)
+
+fluct <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian()
+)
+```
+
+# Define subgroups
+
+```{r}
+subgroup_funs <- list(
+  W_gt_0   = function(df) as.numeric(df$W > 0),
+  W_leq_0  = function(df) as.numeric(df$W <= 0)
+)
+```
+
+# Run subgroup TMLE
+
+```{r}
+fit_subgroup <- run_subgroup_tmle_for_LMTP(
+  ds = ds,
+  policy_seq = policy_seq,
+  nuisance_factory = nf,
+  fluctuation = fluct,
+  subgroup_funs = subgroup_funs,
+  learners_Q = nadir::lnr_glm
+)
+
+fit_subgroup
+```
+
+# Inspect estimates
+
+```{r}
+fit_subgroup$estimate
+
+# ci
+fit_subgroup$se
+fit_subgroup$ci
+
+# eif
+dim(fit_subgroup$eif)
+colnames(fit_subgroup$eif)
+head(fit_subgroup$eif)
+```
+
+# Compare to truth
+
+```{r}
+est_tbl <- data.frame(
+  subgroup = names(fit_subgroup$estimate),
+  estimate = as.numeric(fit_subgroup$estimate),
+  se = as.numeric(fit_subgroup$se),
+  ci_lower = fit_subgroup$ci["lower", ],
+  ci_upper = fit_subgroup$ci["upper", ]
+)
+
+est_tbl$subgroup <- c(`W_gt_0` = 'W > 0', `W_leq_0` = 'W <= 0')[est_tbl$subgroup]
+
+merge(est_tbl, truth_tbl, by = "subgroup", all.x = TRUE)
+```
+

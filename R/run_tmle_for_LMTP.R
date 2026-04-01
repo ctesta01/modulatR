@@ -289,9 +289,21 @@ run_subgroup_tmle_for_LMTP <- function(ds,
     Q0_t <- Q_init[[t]]
     Qvec_t <- Q0_t(A_t, H_t)
 
-    H_obs_t <- .make_subgroup_H_obs(kprov, subgroup_mat, t)
+    K_prev_obs <- if (t == 1L) rep(1, ds$n) else kprov$K_obs(t - 1L)
 
-    H_fun_t <- function(A_vec, H_df) H_obs_t
+    r_t_fun <- nuisance_factory$r_list[[t]]
+    if (is.null(r_t_fun) || !is.function(r_t_fun)) {
+      stop("`r_t_fun` is NULL or not a function at time t = ", t, ".")
+    }
+
+    H_fun_t <- .make_subgroup_H_fun(
+      subgroup_funs = subgroup_funs,
+      pA = pA,
+      K_prev_obs = K_prev_obs,
+      r_t_fun = r_t_fun
+    )
+
+    H_obs_t <- H_fun_t(A_t, H_t)
 
     up <- fluctuation$fit_update(
       Q0_fun_t = Q0_t,
@@ -366,7 +378,7 @@ run_subgroup_tmle_for_LMTP <- function(ds,
     eif_star[, g] <- wg * ic_star + wg * Q1_star_shift - psi_tmle[g]
   }
 
-  var_hat <- apply(eif, 2, stats::var) / ds$n
+  var_hat <- apply(eif_star, 2, stats::var) / ds$n
   se_hat <- sqrt(var_hat)
 
   ci_hat <- rbind(
@@ -385,8 +397,8 @@ run_subgroup_tmle_for_LMTP <- function(ds,
     parameter = "Subgroup E[Y^d]",
     estimator = "Subgroup LMTP TMLE",
     n = ds$n,
-    ic = eif,
-    eif = eif,
+    ic = eif_star,
+    eif = eif_star,
     Q_init = Q_init,
     Q_star = Q_star,
     omega = kprov$K_obs_all,

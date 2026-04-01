@@ -149,3 +149,54 @@ identity_policy <- function(A_type = c("continuous", "discrete"),
     eval = function(A_vec, H_df) Q_full(A_vec, H_df)
   )
 }
+
+
+# helpers for fluctuation in subgroup LMTP --------------------------------
+
+# Evaluate subgroup indicators on an arbitrary data.frame H_df
+.make_subgroup_matrix_from_df <- function(H_df, subgroup_funs) {
+  if (is.function(subgroup_funs)) {
+    subgroup_funs <- list(group = subgroup_funs)
+  }
+  if (!is.list(subgroup_funs) || !all(vapply(subgroup_funs, is.function, logical(1)))) {
+    stop("`subgroup_funs` must be a function or named list of functions.")
+  }
+
+  out <- lapply(subgroup_funs, function(f) {
+    val <- as.numeric(f(H_df))
+    if (length(val) != nrow(H_df)) {
+      stop("Each subgroup function must return a vector of length nrow(H_df).")
+    }
+    if (!all(val %in% c(0, 1))) {
+      stop("Each subgroup function must return 0/1 indicators.")
+    }
+    val
+  })
+
+  out <- as.data.frame(out, check.names = FALSE)
+  if (is.null(names(out))) {
+    names(out) <- paste0("group", seq_len(ncol(out)))
+  }
+  out
+}
+
+.make_subgroup_H_fun <- function(subgroup_funs, pA, K_prev_obs, r_t_fun) {
+  force(subgroup_funs)
+  force(pA)
+  force(K_prev_obs)
+  force(r_t_fun)
+
+  function(A_vec, H_df) {
+    if (length(A_vec) != nrow(H_df)) {
+      stop("`A_vec` must have length nrow(H_df).")
+    }
+
+    G_eval <- .make_subgroup_matrix_from_df(H_df, subgroup_funs)
+    G_eval_scaled <- sweep(G_eval, 2, pA, "/")
+
+    ratio_eval <- K_prev_obs * r_t_fun(A_vec, H_df)
+
+    # multiply each subgroup column by the scalar ratio vector
+    sweep(G_eval_scaled, 1, ratio_eval, "*")
+  }
+}

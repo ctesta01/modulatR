@@ -603,8 +603,21 @@ LMTPNuisanceFactory <- R6::R6Class(
 
         fmls_Q_t <- if (is.null(fml_Q)) {
           vector("list", tau)
+
+        } else if (inherits(fml_Q, "formula")) {
+          rep(list(fml_Q), tau)
+
+        } else if (is.list(fml_Q) && all(vapply(fml_Q, inherits, logical(1), what = "formula"))) {
+          if (length(fml_Q) == 1L && repeat_fmls) {
+            rep(fml_Q, tau)
+          } else if (length(fml_Q) == tau) {
+            fml_Q
+          } else {
+            stop("`fml_Q` must be either a single formula or a list of formulas of length tau.")
+          }
+
         } else {
-          .rep_if_needed(fml_Q, tau, repeat_fmls)
+          stop("`fml_Q` must be NULL, a formula, or a list of formulas.")
         }
 
         learners_Q_extra_args_t <- .rep_if_needed(

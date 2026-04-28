@@ -378,7 +378,7 @@ run_subgroup_tmle_for_LMTP <- function(ds,
     eif_star[, g] <- wg * ic_star + wg * Q1_star_shift - psi_tmle[g]
   }
 
-  var_hat <- apply(eif_star, 2, stats::var) / ds$n
+  var_hat <- apply(eif, 2, stats::var) / ds$n
   se_hat <- sqrt(var_hat)
 
   ci_hat <- rbind(

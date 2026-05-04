@@ -200,3 +200,22 @@ identity_policy <- function(A_type = c("continuous", "discrete"),
     sweep(G_eval_scaled, 1, ratio_eval, "*")
   }
 }
+
+
+#' Clip Probabilities Away from 0-1 by a Small Amount
+.clip_probability <- function(x, clip_probability = 1e-6) {
+  pmin(pmax(x, clip_probability), 1 - clip_probability)
+}
+
+#' Lift Probabilities away from 0 -- Especially for Density Estimates
+.truncate_positive <- function(x, truncate_density = 1e-12) {
+  pmax(x, truncate_density)
+}
+
+
+#' Truncate to an Interval -- Especially for Density Ratios
+.truncate_interval <- function(x, truncate = c(1e-6, Inf)) {
+  pmin(pmax(x, truncate[1]), truncate[2])
+}
+
+

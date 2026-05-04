@@ -377,3 +377,55 @@ LMTPData <- R6::R6Class(
     metadata = ds$metadata
   )
 }
+
+
+#' Attach time-index metadata to an LMTPData object.
+.with_lmtp_time <- function(data, t) {
+  if (!inherits(data, "LMTPData")) stop("`data` must inherit from `LMTPData`.")
+  out <- .subset_ds(data, seq_len(data$n))
+  out$metadata$t <- t
+  out
+}
+
+.with_policy_sequence <- function(data, policy_seq) {
+  if (!inherits(data, "LMTPData")) {
+    stop("`data` must inherit from `LMTPData`.")
+  }
+  if (!inherits(policy_seq, "LMTPPolicySequence")) {
+    stop("`policy_seq` must inherit from `LMTPPolicySequence`.")
+  }
+
+  out <- .subset_ds(data, seq_len(data$n))
+  out$metadata$policy_seq <- policy_seq
+  out
+}
+
+#' Attach a pseudo-outcome column to an LMTPData object.
+.with_pseudo_outcome <- function(data,
+                                 pseudo_outcome,
+                                 pseudo_outcome_col = "..pseudo_outcome") {
+  if (!inherits(data, "LMTPData")) stop("`data` must inherit from `LMTPData`.")
+  if (length(pseudo_outcome) != data$n) {
+    stop("`pseudo_outcome` must have length `data$n`.")
+  }
+
+  df <- data$df
+  df[[pseudo_outcome_col]] <- pseudo_outcome
+
+  out <- LMTPData$new(
+    data = df,
+    id_col = data$id_col,
+    A_cols = data$A_cols,
+    L_cols = data$L_cols,
+    W_cols = data$W_cols,
+    Y_col = data$Y_col,
+    metadata = data$metadata
+  )
+
+  out$metadata$pseudo_outcome_col <- pseudo_outcome_col
+  out
+}
+
+
+
+

@@ -22,14 +22,23 @@ library(TargetedLearning)
 # Generate the dataset
 
 ```{r}
-# to determine truth: 
-n <- 1e6
-W <- rnorm(n)
-eL1 <- rnorm(n)
-eA1 <- rnorm(n)
-eL2 <- rnorm(n)
-eA2 <- rnorm(n)
-eY  <- rnorm(n)
+library(modulatR)
+library(nadir)
+
+# -------------------------------------------------------------------------
+# Truth by large Monte Carlo sample
+# -------------------------------------------------------------------------
+
+set.seed(1)
+
+n_truth <- 1e6
+
+W   <- rnorm(n_truth)
+eL1 <- rnorm(n_truth)
+eA1 <- rnorm(n_truth)
+eL2 <- rnorm(n_truth)
+eA2 <- rnorm(n_truth)
+eY  <- rnorm(n_truth)
 
 L1 <- 0.5 * W + eL1
 A1 <- 0.6 * W + 0.8 * L1 + eA1
@@ -39,19 +48,29 @@ Y  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + eY
 
 A1d <- A1 + 1
 L2d <- 0.4 * W + 0.7 * A1d + 0.6 * L1 + eL2
-A2d <- (0.3 * W + 0.5 * L2d + eA2) + 1
+A2d <- 0.3 * W + 0.5 * L2d + eA2 + 1
 Yd  <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2d + 1.2 * A1d + 0.8 * A2d + eY
 
-truth_EY <- mean(Y)
-truth_EYd <- mean(Yd)
-truth_diff <- mean(Yd - Y)
+truth <- c(
+  EY = mean(Y),
+  EYd = mean(Yd),
+  diff = mean(Yd - Y)
+)
 
-c(EY = truth_EY, EYd = truth_EYd, diff = truth_diff)
+truth
+```
 
-# now for the DGP 
+
+```{r}
+# -------------------------------------------------------------------------
+# Observed data
+# -------------------------------------------------------------------------
+
+set.seed(2)
+
 n <- 8000
 
-W <- rnorm(n)
+W  <- rnorm(n)
 L1 <- 0.5 * W + rnorm(n)
 A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
 L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
@@ -59,17 +78,8 @@ A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
 
 Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
 
-df <- data.frame(
-  W = W,
-  L1 = L1,
-  A1 = A1,
-  L2 = L2,
-  A2 = A2,
-  Y = Y
-)
+df <- data.frame(W, L1, A1, L2, A2, Y)
 
-
-# set up the data
 ds <- LMTPData$new(
   data = df,
   A_cols = c("A1", "A2"),
@@ -79,64 +89,115 @@ ds <- LMTPData$new(
 )
 
 ds
+```
 
-# define the LMTP 
-pol <- mtp_additive_shift(delta = 1)
-policy_seq <- repeat_policy_over_time(pol, tau = ds$tau())
 
-policy_seq
+```{r}
+# -------------------------------------------------------------------------
+# Policies
+# -------------------------------------------------------------------------
 
-# also define the identity 
-identity_seq <- identity_policy(
-  A_type = "continuous",
+policy_shift <- repeat_policy_over_time(
+  mtp_additive_shift(delta = 1),
   tau = ds$tau()
 )
 
-identity_seq
-
-# set up nuisance estimation 
-nf_shift <- LMTPNuisanceFactory$new(
-  learners_g = nadir::lnr_glm_density,
-  policy_seq = policy_seq,
+policy_identity <- identity_policy(
   A_type = "continuous",
-  g_mode = "density"
+  tau = ds$tau()
 )
+```
 
-nf_identity <- LMTPNuisanceFactory$new(
-  learners_g = nadir::lnr_glm_density,
-  policy_seq = identity_seq,
-  A_type = "continuous",
-  g_mode = "density"
-)
 
-fluct <- LMTPFluctuationSubmodel$new(
+```{r}
+# -------------------------------------------------------------------------
+# Learners
+# -------------------------------------------------------------------------
+
+m_fit_funs <- make_glm_m_learners(
+  tau = ds$tau(),
   family = stats::gaussian()
 )
 
-# perform two TMLE tasks, one for E[Y^d] and one for E[Y]
-task_shift <- make_lmtp_tl_task(
+g_fit_funs <- make_nadir_density_g_learners(
+  tau = ds$tau(),
+  learner = nadir::lnr_glm_density
+)
+
+r_fit_funs_shift <- repeat_lmtp_learner(
+  make_density_ratio_learner(
+    g_learner = make_nadir_density_g_learner(
+      learner = nadir::lnr_glm_density
+    ),
+    truncate_density = 1e-12
+  ),
+  tau = ds$tau()
+)
+
+r_fit_funs_identity <- repeat_lmtp_learner(
+  make_density_ratio_learner(
+    g_learner = make_nadir_density_g_learner(
+      learner = nadir::lnr_glm_density
+    ),
+    truncate_density = 1e-12
+  ),
+  tau = ds$tau()
+)
+```
+
+```{r}
+# -------------------------------------------------------------------------
+# Nuisance factories
+# -------------------------------------------------------------------------
+
+nf_shift <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  r_fit_funs = r_fit_funs_shift,
+  m_fit_funs = m_fit_funs,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+nf_identity <- LMTPNuisanceFactory$new(
+  policy_seq = policy_identity,
+  r_fit_funs = r_fit_funs_identity,
+  m_fit_funs = m_fit_funs,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+```
+
+
+```{r}
+# -------------------------------------------------------------------------
+# Fit TMLEs
+# -------------------------------------------------------------------------
+
+fit_shift <- run_tmle_for_LMTP(
   ds = ds,
-  policy_seq = policy_seq,
   nuisance_factory = nf_shift,
-  fluctuation = fluct,
-  learners_Q = nadir::lnr_glm
+  fluctuation = fluctuation
 )
 
-task_identity <- make_lmtp_tl_task(
+fit_identity <- run_tmle_for_LMTP(
   ds = ds,
-  policy_seq = identity_seq,
   nuisance_factory = nf_identity,
-  fluctuation = fluct,
-  learners_Q = nadir::lnr_glm
+  fluctuation = fluctuation
 )
 
-fit_shift <- task_shift$run()
-fit_identity <- task_identity$run()
+fit_shift
+fit_identity
+```
 
-print(fit_shift)
-print(fit_identity)
 
-# calculate difference and compare to truth 
+```{r}
+# -------------------------------------------------------------------------
+# Difference contrast
+# -------------------------------------------------------------------------
+
 fit_diff <- lmtp_delta_contrast(
   fit1 = fit_shift,
   fit0 = fit_identity,
@@ -145,14 +206,22 @@ fit_diff <- lmtp_delta_contrast(
 
 comparison <- data.frame(
   parameter = c("E[Y]", "E[Y^d]", "E[Y^d] - E[Y]"),
-  truth = c(truth_EY, truth_EYd, truth_diff),
-  estimate = c(fit_identity$estimate, fit_shift$estimate, fit_diff$estimate),
-  se = c(fit_identity$se, fit_shift$se, fit_diff$se)
+  truth = c(truth["EY"], truth["EYd"], truth["diff"]),
+  estimate = c(
+    fit_identity$estimate,
+    fit_shift$estimate,
+    fit_diff$estimate
+  ),
+  se = c(
+    fit_identity$se,
+    fit_shift$se,
+    fit_diff$se
+  )
 )
 
 comparison
 
-print(fit_diff)
+fit_diff
 ```
 
 

@@ -26,27 +26,35 @@
 #' stabilization; that should live in a separate fluctuation or targeting object.
 #'
 #' @export
+#' LMTP vector fluctuation submodel
+#'
+#' @description
+#' `LMTPFluctuationSubmodel` implements the targeting step for vector-valued
+#' LMTP sequential regressions.
+#'
+#' It takes untargeted predictions evaluated at the observed treatment and at
+#' the policy-shifted treatment:
+#'
+#' - `m_obs = m_t(A_t, H_t)`
+#' - `m_d   = m_t(A_t^d, H_t)`
+#'
+#' and returns targeted vectors:
+#'
+#' - `m_obs_star = m_t^*(A_t, H_t)`
+#' - `m_d_star   = m_t^*(A_t^d, H_t)`
+#'
+#' @export
 LMTPFluctuationSubmodel <- R6::R6Class(
   "LMTPFluctuationSubmodel",
   public = list(
     family = NULL,
-    bounds = c(NA_real_, NA_real_),
-    clip = 1e-6,
-    use_intercept = FALSE,
-    to01 = NULL,
-    from01 = NULL,
+    bounds = NULL,
+    clip_probability = NULL,
+    use_intercept = NULL,
 
-    #' @description Create a new LMTP fluctuation submodel.
-    #' @param family Either `stats::gaussian()` for identity fluctuation or
-    #'   `stats::binomial()` for logit fluctuation.
-    #' @param bounds Optional lower/upper bounds for the outcome when using a
-    #'   logit fluctuation. Defaults to `c(0, 1)`.
-    #' @param clip Numeric truncation level for probabilities in logit updates.
-    #' @param use_intercept Logical; whether to include an intercept in the
-    #'   fluctuation regression.
     initialize = function(family = stats::gaussian(),
-                          bounds = NULL,
-                          clip = 1e-6,
+                          bounds = c(0, 1),
+                          clip_probability = 1e-6,
                           use_intercept = FALSE) {
       is_logistic <- inherits(family, "family") &&
         family$family == "binomial" &&
@@ -58,125 +66,96 @@ LMTPFluctuationSubmodel <- R6::R6Class(
 
       if (!(is_identity || is_logistic)) {
         stop(
-          "At this time, `LMTPFluctuationSubmodel` only supports ",
-          "`gaussian(identity)` and `binomial(logit)` fluctuations."
+          "`LMTPFluctuationSubmodel` currently supports only ",
+          "`gaussian(identity)` and `binomial(logit)`."
         )
       }
 
-      self$family <- family
-      self$clip <- clip
-      self$use_intercept <- use_intercept
+      if (!is.numeric(clip_probability) ||
+          length(clip_probability) != 1L ||
+          clip_probability <= 0 ||
+          clip_probability >= 0.5) {
+        stop("`clip_probability` must be a scalar in (0, 0.5).")
+      }
 
       if (is_logistic) {
-        if (is.null(bounds)) {
-          bounds <- c(0, 1)
-        }
         if (!is.numeric(bounds) || length(bounds) != 2L) {
           stop("`bounds` must be a numeric vector of length 2.")
         }
         bounds <- sort(bounds)
-        self$bounds <- bounds
-
-        self$to01 <- function(x) {
-          (x - self$bounds[1]) / (self$bounds[2] - self$bounds[1])
-        }
-        self$from01 <- function(z) {
-          self$bounds[1] + (self$bounds[2] - self$bounds[1]) * z
-        }
       }
+
+      self$family <- family
+      self$bounds <- bounds
+      self$clip_probability <- clip_probability
+      self$use_intercept <- use_intercept
 
       invisible(self)
     },
 
-    #' @description Fit a single TMLE fluctuation update.
-    #'
-    #' @param Q0_fun_t Function `(A_vec, H_df) -> numeric` returning the current
-    #'   regression `Q_t(A,H)`.
-    #' @param Qvec Numeric vector of current predictions at the observed data.
-    #' @param target_vec Numeric vector of targets, e.g. `Y` or a next-stage
-    #'   pseudo-outcome.
-    #' @param H_obs Observed clever covariate values at the observed data.
-    #'   May be a numeric vector, matrix, or data.frame.
-    #' @param H_fun_t Function `(A_vec, H_df) -> H(A,H)` returning the clever
-    #'   covariate at arbitrary evaluation points. This may return a vector,
-    #'   matrix, or data.frame.
-    #' @param t Optional time index used only in messages/errors.
-    #'
-    #' @return A list with components:
-    #'   * `epsilon`: scalar or vector fluctuation coefficient(s),
-    #'   * `intercept`: scalar intercept (0 unless `use_intercept = TRUE`),
-    #'   * `fit`: fitted GLM object,
-    #'   * `wrap`: updated regression function `(A_vec, H_df) -> Q_t^*(A,H)`.
-    fit_update = function(Q0_fun_t,
-                          Qvec,
-                          target_vec,
+    fit_update = function(m_obs,
+                          target,
                           H_obs,
-                          H_fun_t,
+                          m_d,
+                          H_d,
                           t = NULL) {
+      private$validate_vector_inputs(
+        m_obs = m_obs,
+        target = target,
+        H_obs = H_obs,
+        m_d = m_d,
+        H_d = H_d
+      )
 
-      if (!is.function(Q0_fun_t)) {
-        stop("`Q0_fun_t` must be a function.")
-      }
-      if (!is.function(H_fun_t)) {
-        stop("`H_fun_t` must be a function.")
-      }
-      if (!is.numeric(Qvec) || !is.numeric(target_vec)) {
-        stop("`Qvec` and `target_vec` must be numeric.")
-      }
-      if (length(Qvec) != length(target_vec)) {
-        stop("`Qvec` and `target_vec` must have the same length.")
+      H_obs_df <- private$normalize_H(H_obs, n = length(m_obs), label = "H_obs")
+      H_d_df <- private$normalize_H(H_d, n = length(m_d), label = "H_d")
+
+      if (!identical(colnames(H_obs_df), colnames(H_d_df))) {
+        stop("`H_obs` and `H_d` must have the same column names.")
       }
 
-      H_df <- private$normalize_H(H_obs, n = length(Qvec), label = "H_obs")
-
-      is_logistic <- inherits(self$family, "family") &&
-        self$family$family == "binomial" &&
-        self$family$link == "logit"
-
-      is_identity <- inherits(self$family, "family") &&
-        self$family$family == "gaussian" &&
-        self$family$link == "identity"
+      is_logistic <- private$is_logistic()
 
       if (is_logistic) {
-        target01 <- private$clip01(self$to01(target_vec))
-        offset_scale <- stats::qlogis(private$clip01(self$to01(Qvec)))
+        y <- private$to_unit_interval(target)
+        offset_obs <- stats::qlogis(private$to_unit_interval(m_obs))
       } else {
-        target01 <- target_vec
-        offset_scale <- Qvec
+        y <- target
+        offset_obs <- m_obs
       }
 
       dat <- data.frame(
-        target = target01,
-        offset_val = offset_scale,
-        H_df,
+        y = y,
+        offset_obs = offset_obs,
+        H_obs_df,
         check.names = FALSE
       )
 
-      H_names <- colnames(H_df)
+      H_names <- colnames(H_obs_df)
 
-      rhs <- if (self$use_intercept) {
+      rhs <- if (isTRUE(self$use_intercept)) {
         paste(H_names, collapse = " + ")
       } else {
         paste0("-1 + ", paste(H_names, collapse = " + "))
       }
 
       fluctuation_formula <- stats::as.formula(
-        paste0("target ~ ", rhs)
+        paste0("y ~ ", rhs)
       )
 
       fit <- suppressWarnings(stats::glm(
         formula = fluctuation_formula,
         family = self$family,
         data = dat,
-        offset = dat$offset_val,
-        start = rep(0, if (self$use_intercept) length(H_names) + 1L else length(H_names))
+        offset = dat$offset_obs
       ))
 
       coefs <- stats::coef(fit)
 
-      if (self$use_intercept) {
+      if (isTRUE(self$use_intercept)) {
         intercept <- unname(coefs["(Intercept)"])
         if (is.na(intercept)) intercept <- 0
+
         eps <- coefs[setdiff(names(coefs), "(Intercept)")]
       } else {
         intercept <- 0
@@ -188,76 +167,67 @@ LMTPFluctuationSubmodel <- R6::R6Class(
       eps <- as.numeric(eps)
       names(eps) <- H_names
 
-      wrap_fun <- local({
-        eps_local <- eps
-        intercept_local <- intercept
-        H_fun_local <- H_fun_t
-        Q0_fun_local <- Q0_fun_t
-        is_logistic_local <- is_logistic
-        clip_local <- self$clip
-        to01_local <- self$to01
-        from01_local <- self$from01
+      shift_obs <- as.numeric(as.matrix(H_obs_df) %*% eps) + intercept
+      shift_d <- as.numeric(as.matrix(H_d_df) %*% eps) + intercept
 
-        function(A_vec, H_df_new) {
-          Q0 <- as.numeric(Q0_fun_local(A_vec, H_df_new))
-          H_new <- private$normalize_H(
-            H_fun_local(A_vec, H_df_new),
-            n = length(Q0),
-            label = "H_fun_t(A, H)"
-          )
-
-          if (!identical(colnames(H_new), H_names)) {
-            stop(
-              "`H_fun_t` returned clever covariate columns that do not match ",
-              "those used to fit the fluctuation."
-            )
-          }
-
-          linpred_shift <- as.numeric(as.matrix(H_new) %*% eps_local) + intercept_local
-
-          if (!is_logistic_local) {
-            return(Q0 + linpred_shift)
-          }
-
-          Q001 <- pmin(pmax(to01_local(Q0), clip_local), 1 - clip_local)
-          Q0star01 <- stats::plogis(stats::qlogis(Q001) + linpred_shift)
-          Q0star01 <- pmin(pmax(Q0star01, clip_local), 1 - clip_local)
-
-          from01_local(Q0star01)
-        }
-      })
+      if (is_logistic) {
+        m_obs_star <- private$update_logistic(m_obs, shift_obs)
+        m_d_star <- private$update_logistic(m_d, shift_d)
+      } else {
+        m_obs_star <- m_obs + shift_obs
+        m_d_star <- m_d + shift_d
+      }
 
       list(
+        fit = fit,
         epsilon = eps,
         intercept = intercept,
-        fit = fit,
-        wrap = wrap_fun
+        m_obs_star = as.numeric(m_obs_star),
+        m_d_star = as.numeric(m_d_star)
       )
     },
 
-    #' @description Print a compact summary.
-    #' @return The object invisibly.
     print = function(...) {
-      fam <- if (inherits(self$family, "family")) {
-        paste0(self$family$family, "(", self$family$link, ")")
-      } else {
-        "<unknown>"
-      }
-
+      fam <- paste0(self$family$family, "(", self$family$link, ")")
       cat("LMTPFluctuationSubmodel\n")
       cat("  family: ", fam, "\n", sep = "")
       cat("  use_intercept: ", self$use_intercept, "\n", sep = "")
-      if (fam == "binomial(logit)") {
+      if (private$is_logistic()) {
         cat("  bounds: [", self$bounds[1], ", ", self$bounds[2], "]\n", sep = "")
-        cat("  clip: ", self$clip, "\n", sep = "")
+        cat("  clip_probability: ", self$clip_probability, "\n", sep = "")
       }
       invisible(self)
     }
   ),
 
   private = list(
+    is_logistic = function() {
+      inherits(self$family, "family") &&
+        self$family$family == "binomial" &&
+        self$family$link == "logit"
+    },
+
     clip01 = function(x) {
-      pmin(pmax(x, self$clip), 1 - self$clip)
+      pmin(
+        pmax(x, self$clip_probability),
+        1 - self$clip_probability
+      )
+    },
+
+    to_unit_interval = function(x) {
+      z <- (x - self$bounds[1]) / (self$bounds[2] - self$bounds[1])
+      private$clip01(z)
+    },
+
+    from_unit_interval = function(z) {
+      self$bounds[1] + (self$bounds[2] - self$bounds[1]) * z
+    },
+
+    update_logistic = function(m, shift) {
+      m01 <- private$to_unit_interval(m)
+      m_star01 <- stats::plogis(stats::qlogis(m01) + shift)
+      m_star01 <- private$clip01(m_star01)
+      private$from_unit_interval(m_star01)
     },
 
     normalize_H = function(H, n, label = "H") {
@@ -278,19 +248,17 @@ LMTPFluctuationSubmodel <- R6::R6Class(
           stop("`", label, "` must have ", n, " rows.")
         }
         out <- as.data.frame(H, check.names = FALSE)
-        if (is.null(colnames(out))) {
-          colnames(out) <- paste0("H", seq_len(ncol(out)))
-        }
       } else if (is.data.frame(H)) {
         if (nrow(H) != n) {
           stop("`", label, "` must have ", n, " rows.")
         }
         out <- H
-        if (is.null(colnames(out))) {
-          colnames(out) <- paste0("H", seq_len(ncol(out)))
-        }
       } else {
         stop("`", label, "` must be a numeric vector, matrix, or data.frame.")
+      }
+
+      if (is.null(colnames(out))) {
+        colnames(out) <- paste0("H", seq_len(ncol(out)))
       }
 
       if (anyDuplicated(colnames(out))) {
@@ -298,6 +266,29 @@ LMTPFluctuationSubmodel <- R6::R6Class(
       }
 
       out
+    },
+
+    validate_vector_inputs = function(m_obs, target, H_obs, m_d, H_d) {
+      if (!is.numeric(m_obs) || !is.numeric(target) || !is.numeric(m_d)) {
+        stop("`m_obs`, `target`, and `m_d` must be numeric vectors.")
+      }
+
+      n <- length(m_obs)
+
+      if (length(target) != n ||
+          length(m_d) != n) {
+        stop("`m_obs`, `target`, and `m_d` must have the same length.")
+      }
+
+      if (is.vector(H_obs) && !is.list(H_obs) && length(H_obs) != n) {
+        stop("`H_obs` must have length ", n, ".")
+      }
+
+      if (is.vector(H_d) && !is.list(H_d) && length(H_d) != n) {
+        stop("`H_d` must have length ", n, ".")
+      }
+
+      invisible(TRUE)
     }
   )
 )

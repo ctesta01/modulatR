@@ -16,13 +16,11 @@ knitr::opts_chunk$set(
 )
 set.seed(2026)
 library(modulatR)
-library(TargetedLearning)
 ```
 
 # Generate the dataset
 
 ```{r}
-library(modulatR)
 library(nadir)
 
 # -------------------------------------------------------------------------
@@ -106,61 +104,42 @@ policy_identity <- identity_policy(
   A_type = "continuous",
   tau = ds$tau()
 )
+
+policy_shift
+policy_identity
 ```
 
 
 ```{r}
-# -------------------------------------------------------------------------
-# Learners
-# -------------------------------------------------------------------------
+# Learners ----------------------------------------------------------------
 
-m_fit_funs <- make_glm_m_learners(
+m_learners <- make_glm_m_learners(
   tau = ds$tau(),
   family = stats::gaussian()
 )
 
-g_fit_funs <- make_nadir_density_g_learners(
+g_learners <- make_nadir_density_g_learners(
   tau = ds$tau(),
   learner = nadir::lnr_glm_density
-)
-
-r_fit_funs_shift <- repeat_lmtp_learner(
-  make_density_ratio_learner(
-    g_learner = make_nadir_density_g_learner(
-      learner = nadir::lnr_glm_density
-    ),
-    truncate_density = 1e-12
-  ),
-  tau = ds$tau()
-)
-
-r_fit_funs_identity <- repeat_lmtp_learner(
-  make_density_ratio_learner(
-    g_learner = make_nadir_density_g_learner(
-      learner = nadir::lnr_glm_density
-    ),
-    truncate_density = 1e-12
-  ),
-  tau = ds$tau()
 )
 ```
 
 ```{r}
-# -------------------------------------------------------------------------
-# Nuisance factories
-# -------------------------------------------------------------------------
+# Nuisance factories -------------------------------------------------------
 
 nf_shift <- LMTPNuisanceFactory$new(
   policy_seq = policy_shift,
-  r_fit_funs = r_fit_funs_shift,
-  m_fit_funs = m_fit_funs,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
   truncate_ratio = c(1e-6, Inf)
 )
 
 nf_identity <- LMTPNuisanceFactory$new(
   policy_seq = policy_identity,
-  r_fit_funs = r_fit_funs_identity,
-  m_fit_funs = m_fit_funs,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
   truncate_ratio = c(1e-6, Inf)
 )
 
@@ -172,9 +151,7 @@ fluctuation <- LMTPFluctuationSubmodel$new(
 
 
 ```{r}
-# -------------------------------------------------------------------------
-# Fit TMLEs
-# -------------------------------------------------------------------------
+# Fit TMLEs ---------------------------------------------------------------
 
 fit_shift <- run_tmle_for_LMTP(
   ds = ds,
@@ -194,9 +171,7 @@ fit_identity
 
 
 ```{r}
-# -------------------------------------------------------------------------
-# Difference contrast
-# -------------------------------------------------------------------------
+# Difference contrast ------------------------------------------------------
 
 fit_diff <- lmtp_delta_contrast(
   fit1 = fit_shift,

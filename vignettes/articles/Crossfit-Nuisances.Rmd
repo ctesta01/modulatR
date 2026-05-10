@@ -1,0 +1,355 @@
+---
+title: "Using cross-fitted nuisance learners"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using cross-fitted nuisance learners}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+if (!requireNamespace("origami", quietly = TRUE)) {
+  knitr::knit_exit()
+}
+
+set.seed(2026)
+
+library(modulatR)
+library(nadir)
+library(origami)
+```
+
+The nuisance learners in `{modulatR}` have a simple contract: 
+each learner takes one `LMTPData` object and returns a prediction function. 
+Cross-fitting is implemented as a wrapper around such learners. 
+This means that the nuisance factory does not need to know whether a learner is cross-fitted.
+(In fact, nuisance factories can be completely blind/agnostic to the internals
+of what nuisance fitting function code does -- it just needs to accept data, and
+return a prediction function. To work correctly, such nuisance function fitting 
+code -- referred to as `m_learners`, `g_learners` or `r_learners` in the code -- 
+will need to be correctly specified). 
+
+```{r}
+# Data-generating process --------------------------------------------------
+
+set.seed(1)
+
+n <- 1500
+
+W  <- rnorm(n)
+L1 <- 0.5 * W + rnorm(n)
+A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+
+Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+df <- data.frame(W, L1, A1, L2, A2, Y)
+
+ds <- LMTPData$new(
+  data = df,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+```
+
+# Policy Definition
+
+We use a simple additive-shift LMTP that increases each exposure by one unit.
+
+```{r}
+policy_shift <- repeat_policy_over_time(
+  mtp_additive_shift(delta = 1),
+  tau = ds$tau()
+)
+
+policy_shift
+```
+
+# Check the crossfitting  of a learner manually
+
+This is sort of an overly simple example, but meant
+to illustrate the point of crossfitting a learner. 
+
+```{r}
+base_m_learner <- make_glm_m_learner(
+  family = stats::gaussian()
+)
+
+cf_m_learner <- crossfit_lmtp_learner(
+  learner = base_m_learner,
+  V = 3
+)
+
+# Prepare a time-indexed dataset with a pseudo-outcome.
+ds_t <- ds |>
+  modulatR:::.with_policy_sequence(policy_shift) |>
+  modulatR:::.with_lmtp_time(2) |>
+  modulatR:::.with_pseudo_outcome(ds$Y())
+
+m_predict <- cf_m_learner(ds_t)
+
+is.function(m_predict)
+
+m_pred <- m_predict(ds_t)
+
+length(m_pred)
+head(m_pred)
+summary(m_pred)
+```
+
+The output should show that `m_predict` is a function and that it returns one prediction per row of `ds_t`.
+
+# Fit with cross-fit nuisance learners
+
+```{r}
+m_learners <- lapply(
+  make_glm_m_learners(
+    tau = ds$tau(),
+    family = stats::gaussian()
+  ),
+  crossfit_lmtp_learner,
+  V = 3
+)
+
+g_learners <- lapply(
+  make_nadir_density_g_learners(
+    tau = ds$tau(),
+    learner = nadir::lnr_glm_density
+  ),
+  crossfit_lmtp_learner,
+  V = 3
+)
+```
+
+# Specify a Nuisance Factory 
+
+```{r}
+nf_shift_cf <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+```
+
+# Fit a TMLE with Crossfit Nuisances 
+
+```{r}
+fit_shift_cf <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift_cf,
+  fluctuation = fluctuation
+)
+
+fit_shift_cf
+```
+
+
+# Now an example where crossfitting is more useful
+
+```{r}
+# A nonlinear example where cross-fitting is more relevant -----------------
+
+# In the previous example, the data-generating process is linear and the GLM
+# nuisance learners are essentially correctly specified. Here we create a more
+# nonlinear DGP and use a ranger learner for the outcome regressions. This makes
+# the use of cross-fitting less cosmetic.
+
+# Truth by large Monte Carlo sample ----------------------------------------
+
+set.seed(101)
+
+n_truth <- 2e5
+
+W   <- rnorm(n_truth)
+eL1 <- rnorm(n_truth)
+eA1 <- rnorm(n_truth)
+eL2 <- rnorm(n_truth)
+eA2 <- rnorm(n_truth)
+eY  <- rnorm(n_truth)
+
+L1 <- 0.5 * W + 0.3 * sin(W) + eL1
+A1 <- 0.6 * W + 0.8 * L1 + 0.4 * W^2 + eA1
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + 0.5 * sin(A1) + eL2
+A2 <- 0.3 * W + 0.5 * L2 + 0.25 * L1^2 + eA2
+
+Y <- 1 +
+  0.5 * W +
+  0.4 * L1 +
+  0.3 * L2 +
+  1.2 * A1 +
+  0.8 * A2 +
+  0.7 * sin(A1) +
+  0.5 * cos(L2) +
+  0.25 * A1 * L1 +
+  eY
+
+A1d <- A1 + 1
+L2d <- 0.4 * W + 0.7 * A1d + 0.6 * L1 + 0.5 * sin(A1d) + eL2
+A2d <- 0.3 * W + 0.5 * L2d + 0.25 * L1^2 + eA2 + 1
+
+Yd <- 1 +
+  0.5 * W +
+  0.4 * L1 +
+  0.3 * L2d +
+  1.2 * A1d +
+  0.8 * A2d +
+  0.7 * sin(A1d) +
+  0.5 * cos(L2d) +
+  0.25 * A1d * L1 +
+  eY
+
+truth_nonlinear <- c(
+  EY = mean(Y),
+  EYd = mean(Yd),
+  diff = mean(Yd - Y)
+)
+
+truth_nonlinear
+
+# Observed nonlinear sample ------------------------------------------------
+
+set.seed(102)
+
+n_nonlinear <- 3000
+
+W  <- rnorm(n_nonlinear)
+L1 <- 0.5 * W + 0.3 * sin(W) + rnorm(n_nonlinear)
+A1 <- 0.6 * W + 0.8 * L1 + 0.4 * W^2 + rnorm(n_nonlinear)
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + 0.5 * sin(A1) + rnorm(n_nonlinear)
+A2 <- 0.3 * W + 0.5 * L2 + 0.25 * L1^2 + rnorm(n_nonlinear)
+
+Y <- 1 +
+  0.5 * W +
+  0.4 * L1 +
+  0.3 * L2 +
+  1.2 * A1 +
+  0.8 * A2 +
+  0.7 * sin(A1) +
+  0.5 * cos(L2) +
+  0.25 * A1 * L1 +
+  rnorm(n_nonlinear)
+
+df_nonlinear <- data.frame(W, L1, A1, L2, A2, Y)
+
+ds_nonlinear <- LMTPData$new(
+  data = df_nonlinear,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+policy_shift_nonlinear <- repeat_policy_over_time(
+  mtp_additive_shift(delta = 1),
+  tau = ds_nonlinear$tau()
+)
+
+# Flexible m learners using ranger ----------------------------------------
+
+# This assumes nadir::lnr_ranger follows the same learner contract used by
+# nadir learners in the rest of the package. If your local nadir::lnr_ranger
+# takes ranger-specific arguments, add them here.
+m_learners_ranger <- repeat_lmtp_learner(
+  make_nadir_m_learner(
+    learner = nadir::lnr_ranger
+  ),
+  tau = ds_nonlinear$tau()
+)
+
+m_learners_ranger_cf <- lapply(
+  m_learners_ranger,
+  crossfit_lmtp_learner,
+  V = 3
+)
+
+# Keep the treatment density model simple for this example. The main point is
+# to show the cross-fitting wrapper sitting on top of a flexible outcome learner.
+g_learners_density <- make_nadir_density_g_learners(
+  tau = ds_nonlinear$tau(),
+  learner = nadir::lnr_glm_density
+)
+
+g_learners_density_cf <- lapply(
+  g_learners_density,
+  crossfit_lmtp_learner,
+  V = 3
+)
+
+# Plain flexible fit -------------------------------------------------------
+
+nf_shift_ranger <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift_nonlinear,
+  m_learners = m_learners_ranger,
+  g_learners = g_learners_density,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fit_shift_ranger <- run_tmle_for_LMTP(
+  ds = ds_nonlinear,
+  nuisance_factory = nf_shift_ranger,
+  fluctuation = fluctuation
+)
+
+# Cross-fitted flexible fit ------------------------------------------------
+
+nf_shift_ranger_cf <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift_nonlinear,
+  m_learners = m_learners_ranger_cf,
+  g_learners = g_learners_density_cf,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fit_shift_ranger_cf <- run_tmle_for_LMTP(
+  ds = ds_nonlinear,
+  nuisance_factory = nf_shift_ranger_cf,
+  fluctuation = fluctuation
+)
+
+# Compare against truth ----------------------------------------------------
+
+comparison_nonlinear <- data.frame(
+  estimator = c("truth", "ranger", "cross-fitted ranger"),
+  estimate = c(
+    truth_nonlinear["EYd"],
+    fit_shift_ranger$estimate,
+    fit_shift_ranger_cf$estimate
+  ),
+  se = c(
+    NA_real_,
+    fit_shift_ranger$se,
+    fit_shift_ranger_cf$se
+  ),
+  error = c(
+    0,
+    fit_shift_ranger$estimate - truth_nonlinear["EYd"],
+    fit_shift_ranger_cf$estimate - truth_nonlinear["EYd"]
+  )
+)
+
+comparison_nonlinear
+
+fit_shift_ranger
+fit_shift_ranger_cf
+```
+

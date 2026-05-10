@@ -21,7 +21,10 @@ Imports:
     randomForest,
     ranger,
     tibble,
-    tidyr
+    tidyr,
+    origami,
+    future,
+    future.apply
 Suggests:
     knitr,
     rmarkdown,

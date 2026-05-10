@@ -1,4 +1,5 @@
-# core runner: E[Y^d] -------------------------------------------------
+
+# this file handles the core runner for estimating E[Y^d]
 
 #' Estimate a scalar TMLE for an LMTP mean
 #'
@@ -42,18 +43,18 @@ run_tmle_for_LMTP <- function(ds,
   tau <- ds$tau()
   n <- ds$n
 
-  # -----------------------------------------------------------------------
+  #
   # 1. Fit ratio nuisance vectors.
   #
   # Stores:
   #   r_obs[[t]]     = r_t(A_t, H_t)
   #   r_d[[t]]       = r_t(A_t^d, H_t)
   #   omega_obs[[t]] = prod_{s <= t} r_s(A_s, H_s)
-  # -----------------------------------------------------------------------
+  #
 
-  nuisance_factory$train(ds)
+  nuisance_factory$train_ratios(ds)
 
-  # -----------------------------------------------------------------------
+  #
   # 2. Fit initial, untargeted sequential regressions.
   #
   # Stores:
@@ -63,7 +64,7 @@ run_tmle_for_LMTP <- function(ds,
   # The pseudo-outcome recursion is:
   #   pseudo_tau = Y
   #   pseudo_{t-1} = m_t(A_t^d, H_t)
-  # -----------------------------------------------------------------------
+  #
 
   m_init_obs <- vector("list", tau)
   m_init_d <- vector("list", tau)
@@ -71,21 +72,21 @@ run_tmle_for_LMTP <- function(ds,
   pseudo_outcome_init <- ds$Y()
 
   for (t in rev(seq_len(tau))) {
-    fit_m_t <- nuisance_factory$fit_m(
-      data = ds,
+    m_t <- nuisance_factory$train_m_t(
+      ds = ds,
       t = t,
       pseudo_outcome = pseudo_outcome_init
     )
 
-    m_init_obs[[t]] <- fit_m_t$m_obs
-    m_init_d[[t]] <- fit_m_t$m_d
+    m_init_obs[[t]] <- m_t$m_obs
+    m_init_d[[t]] <- m_t$m_d
 
     if (t > 1L) {
-      pseudo_outcome_init <- fit_m_t$m_d
+      pseudo_outcome_init <- m_t$m_d
     }
   }
 
-  # -----------------------------------------------------------------------
+  #
   # 3. Targeted backward recursion.
   #
   # The fluctuation object handles the submodel. The runner supplies vectors:
@@ -97,7 +98,7 @@ run_tmle_for_LMTP <- function(ds,
   #     H_d_t = omega_{t-1} * r_t(A_t^d, H_t)
   #
   # The plug-in recursion uses targeted policy-value predictions m_t^d,*.
-  # -----------------------------------------------------------------------
+  #
 
   m_star_obs <- vector("list", tau)
   m_star_d <- vector("list", tau)
@@ -109,7 +110,7 @@ run_tmle_for_LMTP <- function(ds,
 
   for (t in rev(seq_len(tau))) {
     H_obs_t <- nuisance_factory$omega(t)
-    H_d_t <- nuisance_factory$omega_prev(t, n = n) * nuisance_factory$r_d[[t]]
+    H_d_t <- nuisance_factory$omega_prev(t, n = n) * nuisance_factory$r_d_preds[[t]]
 
     update_t <- fluctuation$fit_update(
       m_obs = m_init_obs[[t]],
@@ -131,15 +132,15 @@ run_tmle_for_LMTP <- function(ds,
     }
   }
 
-  # -----------------------------------------------------------------------
+  #
   # 4. TMLE plug-in estimate.
   #
   # Uses targeted m_1 evaluated at the modified treatment value.
-  # -----------------------------------------------------------------------
+  #
 
   psi_hat <- mean(m_star_d[[1L]])
 
-  # -----------------------------------------------------------------------
+  #
   # 5. Estimated EIF / IC.
   #
   # Crucial: use untargeted nuisance regressions m_init, not m_star.
@@ -152,7 +153,7 @@ run_tmle_for_LMTP <- function(ds,
   # where:
   #   next_untargeted_t = Y for t = tau
   #   next_untargeted_t = m_{t+1}(A_{t+1}^d,H_{t+1}) otherwise.
-  # -----------------------------------------------------------------------
+  #
 
   eif <- rep(0, n)
 
@@ -186,22 +187,21 @@ run_tmle_for_LMTP <- function(ds,
     ic = eif,
     eif = eif,
 
-    Q_init = list(
+    m_init = list(
       m_obs = m_init_obs,
       m_d = m_init_d
     ),
-    Q_star = list(
+    m_star = list(
       m_obs = m_star_obs,
       m_d = m_star_d
     ),
-
-    omega = nuisance_factory$omega_obs,
+    omega = nuisance_factory$omega_preds,
     eps = eps,
     intercept = intercept
   )
 }
 
-# run_subgroup_tmle_for_LMTP -------------------------------------------------------------
+# run_subgroup_tmle_for_LMTP
 
 #' Run a simultaneous subgroup TMLE for LMTP subgroup means
 #'
@@ -280,9 +280,9 @@ run_subgroup_tmle_for_LMTP <- function(ds,
   eps <- vector("list", tau)
   intercept <- vector("list", tau)
 
-  # --------------------------------
+  #
   # Track 1: untargeted Q recursion
-  # --------------------------------
+  #
   target_next <- ds$Y()
 
   for (t in rev(seq_len(tau))) {
@@ -298,9 +298,9 @@ run_subgroup_tmle_for_LMTP <- function(ds,
     }
   }
 
-  # --------------------------------
+  #
   # Track 2: targeted Q recursion
-  # --------------------------------
+  #
   target_next_star <- ds$Y()
 
   for (t in rev(seq_len(tau))) {
@@ -430,56 +430,7 @@ run_subgroup_tmle_for_LMTP <- function(ds,
   )
 }
 
-# TL_Task wrappers ------------------------------------------------------------
 
-#' Construct a TL_Task for scalar LMTP TMLE
-#'
-#' @param ds An `LMTPData` object.
-#' @param policy_seq An `LMTPPolicySequence`.
-#' @param nuisance_factory An `LMTPNuisanceFactory`.
-#' @param fluctuation An `LMTPFluctuationSubmodel`.
-#' @param learners_Q Learner spec for the Q recursion.
-#' @param fml_Q Optional formulas for Q.
-#' @param learners_Q_extra_args Optional extra args for Q learners.
-#'
-#' @return A `TL_Task`.
-#' @export
-make_lmtp_tl_task <- function(ds,
-                              policy_seq,
-                              nuisance_factory,
-                              fluctuation,
-                              learners_Q,
-                              fml_Q = NULL,
-                              learners_Q_extra_args = NULL) {
-
-  task <- TL_Task$new(
-    parameter = list(name = "E[Y^d]"),
-    data = ds,
-    nuisance_factory = nuisance_factory,
-    fluctuation = fluctuation,
-    targeting_step = function() NULL,
-    run = function(alpha = 0.05) {
-      self$results <- run_tmle_for_LMTP(
-        ds = self$data,
-        policy_seq = self$policy_seq,
-        nuisance_factory = self$nuisances,
-        fluctuation = self$fluctuation,
-        learners_Q = self$learners_Q,
-        fml_Q = self$fml_Q,
-        learners_Q_extra_args = self$learners_Q_extra_args,
-        alpha = alpha
-      )
-      self$results
-    }
-  )
-
-  task$policy_seq <- policy_seq
-  task$learners_Q <- learners_Q
-  task$fml_Q <- fml_Q
-  task$learners_Q_extra_args <- learners_Q_extra_args
-
-  task
-}
 
 #' Construct a TL_Task for subgroup LMTP TMLE
 #'

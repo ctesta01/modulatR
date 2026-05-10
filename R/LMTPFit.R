@@ -12,8 +12,8 @@ LMTPFit <- R6::R6Class(
     n = NULL,
     ic = NULL,
     eif = NULL,
-    Q_init = NULL,
-    Q_star = NULL,
+    m_init = NULL,
+    m_star = NULL,
     omega = NULL,
     eps = NULL,
     intercept = NULL,
@@ -29,8 +29,8 @@ LMTPFit <- R6::R6Class(
                           n = NULL,
                           ic = NULL,
                           eif = NULL,
-                          Q_init = NULL,
-                          Q_star = NULL,
+                          m_init = NULL,
+                          m_star = NULL,
                           omega = NULL,
                           eps = NULL,
                           intercept = NULL,
@@ -45,8 +45,8 @@ LMTPFit <- R6::R6Class(
       self$n <- n
       self$ic <- ic
       self$eif <- eif
-      self$Q_init <- Q_init
-      self$Q_star <- Q_star
+      self$m_init <- m_init
+      self$m_star <- m_star
       self$omega <- omega
       self$eps <- eps
       self$intercept <- intercept

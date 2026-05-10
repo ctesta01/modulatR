@@ -1,5 +1,5 @@
 
-# this file handles the core runner for estimating E[Y^d]
+# this file handles the core runners for estimating E[Y^d]  and E[Y^d | V = v]
 
 #' Estimate a scalar TMLE for an LMTP mean
 #'

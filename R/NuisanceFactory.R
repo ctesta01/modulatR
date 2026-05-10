@@ -417,8 +417,7 @@ LMTPNuisanceFactory <- R6::R6Class(
     },
 
     prepare_time_data = function(ds, t) {
-      out <- .with_policy_sequence(ds, self$policy_seq)
-      out <- .with_lmtp_time(out, t)
+      out <- .with_lmtp_time(ds, t)
       out
     },
 

@@ -103,6 +103,8 @@ LMTPData <- R6::R6Class(
                           metadata = list()) {
       private$.data <- as.data.frame(data)
 
+      # make sure an ID column exists
+      # default is to call it '..row_id' if it isn't given
       if (is.null(id_col)) {
         auto_id <- "..row_id"
         if (auto_id %in% colnames(private$.data)) {
@@ -113,6 +115,12 @@ LMTPData <- R6::R6Class(
         }
         private$.data[[auto_id]] <- seq_len(nrow(private$.data))
         id_col <- auto_id
+      }
+
+      # if tau == 1 then L_cols can just be a character vector
+      # but it needs to be converted to a list in that case
+      if (length(A_cols) == 1 && class(L_cols) == 'character') {
+        L_cols = list(L_cols)
       }
 
       self$id_col <- id_col

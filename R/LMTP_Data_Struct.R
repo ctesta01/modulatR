@@ -395,19 +395,6 @@ LMTPData <- R6::R6Class(
   out
 }
 
-.with_policy_sequence <- function(data, policy_seq) {
-  if (!inherits(data, "LMTPData")) {
-    stop("`data` must inherit from `LMTPData`.")
-  }
-  if (!inherits(policy_seq, "LMTPPolicySequence")) {
-    stop("`policy_seq` must inherit from `LMTPPolicySequence`.")
-  }
-
-  out <- .subset_ds(data, seq_len(data$n))
-  out$metadata$policy_seq <- policy_seq
-  out
-}
-
 #' Attach a pseudo-outcome column to an LMTPData object.
 .with_pseudo_outcome <- function(data,
                                  pseudo_outcome,

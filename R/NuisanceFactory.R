@@ -17,21 +17,25 @@
 #' g learner:
 #'   g_learner(data_t) -> function(newdata_t) numeric(nrow(newdata_t$df))
 #'
-#' r learner:
-#'   r_learner(data_t) -> function(newdata_t) numeric(nrow(newdata_t$df))
+#  lambda learner:
+#'   lambda_learner(data_t_augmented) -> function(newdata_t) numeric(nrow(newdata_t$df))
 #'
-#' A q learner predicts the pseudo-outcome stored in
+#' A m learner predicts the pseudo-outcome stored in
 #' `data_t$metadata$pseudo_outcome_col`.
 #'
 #' A g learner predicts the observed treatment density or mass
 #' `g_t(A_t | H_t)`.
 #'
-#' An r learner predicts the density ratio
-#' `r_t(A_t,H_t) = g_t^d(A_t | H_t) / g_t(A_t | H_t)`.
+#' A lambda learner predicts `P(lambda = 1 | A_t, H_t)` in the augmented
+#' observed-versus-policy-shifted classification problem where `lambda = 1` is the
+#' indicator for when `A_t` is the intervention value. The factory converts
+#' this to the density ratio `r_t = lambda_t / (1 - lambda_t)`.
 #'
-#' Exactly one of `g_learners` and `r_learners` must be supplied.
+#' Exactly one of `g_learners` and `lambda_learners` must be supplied.
 #'
 #' @export
+# LMTP nuisance factory ----------------------------------------------------
+
 # LMTP nuisance factory ----------------------------------------------------
 
 LMTPNuisanceFactory <- R6::R6Class(
@@ -42,10 +46,11 @@ LMTPNuisanceFactory <- R6::R6Class(
 
     m_learners = NULL,
     g_learners = NULL,
-    r_learners = NULL,
+    lambda_learners = NULL,
 
     truncate_density = NULL,
     truncate_ratio = NULL,
+    clip_lambda_probability = NULL,
 
     m_obs_preds = NULL,
     m_d_preds = NULL,
@@ -55,6 +60,9 @@ LMTPNuisanceFactory <- R6::R6Class(
     g_d_input_preds = NULL,
     gd_d_input_preds = NULL,
 
+    lambda_obs_preds = NULL,
+    lambda_d_preds = NULL,
+
     r_obs_preds = NULL,
     r_d_preds = NULL,
     omega_preds = NULL,
@@ -62,9 +70,10 @@ LMTPNuisanceFactory <- R6::R6Class(
     initialize = function(policy_seq,
                           m_learners,
                           g_learners = NULL,
-                          r_learners = NULL,
+                          lambda_learners = NULL,
                           truncate_density = 1e-12,
-                          truncate_ratio = c(1e-6, Inf)) {
+                          truncate_ratio = c(1e-6, Inf),
+                          clip_lambda_probability = 1e-6) {
       if (!inherits(policy_seq, "LMTPPolicySequence")) {
         stop("`policy_seq` must inherit from `LMTPPolicySequence`.")
       }
@@ -79,10 +88,10 @@ LMTPNuisanceFactory <- R6::R6Class(
       )
 
       has_g <- !is.null(g_learners)
-      has_r <- !is.null(r_learners)
+      has_lambda <- !is.null(lambda_learners)
 
-      if (has_g == has_r) {
-        stop("Supply exactly one of `g_learners` and `r_learners`.")
+      if (has_g == has_lambda) {
+        stop("Supply exactly one of `g_learners` or `lambda_learners`.")
       }
 
       self$g_learners <- if (has_g) {
@@ -91,8 +100,8 @@ LMTPNuisanceFactory <- R6::R6Class(
         NULL
       }
 
-      self$r_learners <- if (has_r) {
-        private$as_time_list(r_learners, self$tau, "r_learners")
+      self$lambda_learners <- if (has_lambda) {
+        private$as_time_list(lambda_learners, self$tau, "lambda_learners")
       } else {
         NULL
       }
@@ -110,8 +119,16 @@ LMTPNuisanceFactory <- R6::R6Class(
         stop("`truncate_ratio` must be c(lower, upper), with 0 < lower <= upper.")
       }
 
+      if (!is.numeric(clip_lambda_probability) ||
+          length(clip_lambda_probability) != 1L ||
+          clip_lambda_probability <= 0 ||
+          clip_lambda_probability >= 0.5) {
+        stop("`clip_lambda_probability` must be a scalar in (0, 0.5).")
+      }
+
       self$truncate_density <- truncate_density
       self$truncate_ratio <- truncate_ratio
+      self$clip_lambda_probability <- clip_lambda_probability
 
       invisible(self)
     },
@@ -216,13 +233,18 @@ LMTPNuisanceFactory <- R6::R6Class(
         self$gd_d_input_preds <- vector("list", self$tau)
       }
 
+      if (!is.null(self$lambda_learners)) {
+        self$lambda_obs_preds <- vector("list", self$tau)
+        self$lambda_d_preds <- vector("list", self$tau)
+      }
+
       omega_t <- rep(1, ds$n)
 
       for (t in seq_len(self$tau)) {
         ratio_t <- if (!is.null(self$g_learners)) {
           self$train_g_t(ds, t)
         } else {
-          self$train_r_t(ds, t)
+          self$train_lambda_t(ds, t)
         }
 
         self$r_obs_preds[[t]] <- .truncate_interval(
@@ -278,10 +300,11 @@ LMTPNuisanceFactory <- R6::R6Class(
       )
 
       density_fun <- function(A_vec, H_df) {
-        newdata <- private$replace_treatment_in_time_data(
-          ds_t,
+        newdata <- private$make_prediction_data(
+          template = ds_t,
           t = t,
-          A_vec = A_vec
+          A_vec = A_vec,
+          H_df = H_df
         )
 
         private$as_numeric_prediction(
@@ -322,29 +345,49 @@ LMTPNuisanceFactory <- R6::R6Class(
       )
     },
 
-    train_r_t = function(ds, t) {
+    train_lambda_t = function(ds, t) {
       self$validate_ds(ds)
       private$check_t(t)
 
-      if (is.null(self$r_learners)) {
-        stop("`r_learners` is NULL.")
+      if (is.null(self$lambda_learners)) {
+        stop("`lambda_learners` is NULL.")
       }
 
       ds_t <- private$prepare_time_data(ds, t)
       ds_t_d <- private$with_modified_treatment(ds_t, t)
 
-      r_predict <- self$r_learners[[t]](ds_t)
+      ds_aug <- private$augment_for_ratio_classification(ds_t, t)
 
-      if (!is.function(r_predict)) {
-        stop("`r_learners[[", t, "]]` must return a prediction function.")
+      lambda_predict <- self$lambda_learners[[t]](ds_aug)
+
+      if (!is.function(lambda_predict)) {
+        stop("`lambda_learners[[", t, "]]` must return a prediction function.")
       }
 
-      r_obs <- private$as_numeric_prediction(r_predict(ds_t), ds_t$n, "r_obs")
-      r_d <- private$as_numeric_prediction(r_predict(ds_t_d), ds_t$n, "r_d")
+      lambda_obs <- .clip_probability(
+        private$as_numeric_prediction(
+          lambda_predict(ds_t),
+          ds_t$n,
+          "lambda_obs"
+        ),
+        clip_probability = self$clip_lambda_probability
+      )
+
+      lambda_d <- .clip_probability(
+        private$as_numeric_prediction(
+          lambda_predict(ds_t_d),
+          ds_t$n,
+          "lambda_d"
+        ),
+        clip_probability = self$clip_lambda_probability
+      )
+
+      self$lambda_obs_preds[[t]] <- lambda_obs
+      self$lambda_d_preds[[t]] <- lambda_d
 
       list(
-        r_obs = r_obs,
-        r_d = r_d
+        r_obs = lambda_obs / (1 - lambda_obs),
+        r_d = lambda_d / (1 - lambda_d)
       )
     },
 
@@ -367,10 +410,16 @@ LMTPNuisanceFactory <- R6::R6Class(
     },
 
     print = function(...) {
+      ratio_source <- if (!is.null(self$g_learners)) {
+        "g_learners"
+      } else {
+        "lambda_learners"
+      }
+
       cat("LMTPNuisanceFactory\n")
       cat("  tau: ", self$tau, "\n", sep = "")
       cat("  policy: ", self$policy_seq$name, "\n", sep = "")
-      cat("  ratio source: ", if (!is.null(self$g_learners)) "g_learners" else "r_learners", "\n", sep = "")
+      cat("  ratio source: ", ratio_source, "\n", sep = "")
       cat("  ratios trained: ", !is.null(self$r_obs_preds), "\n", sep = "")
       cat("  m regressions trained: ", !is.null(self$m_d_preds), "\n", sep = "")
       invisible(self)
@@ -423,8 +472,9 @@ LMTPNuisanceFactory <- R6::R6Class(
 
     with_modified_treatment = function(ds_t, t) {
       A_t_d <- self$policy_seq$apply_t(t, ds_t$A(t), ds_t$H(t))
+
       private$replace_treatment_in_time_data(
-        ds_t,
+        ds_t = ds_t,
         t = t,
         A_vec = A_t_d
       )
@@ -447,6 +497,72 @@ LMTPNuisanceFactory <- R6::R6Class(
         Y_col = ds_t$Y_col,
         metadata = ds_t$metadata
       )
+    },
+
+    make_prediction_data = function(template, t, A_vec, H_df) {
+      if (length(A_vec) != nrow(H_df)) {
+        stop("`A_vec` must have length `nrow(H_df)`.")
+      }
+
+      df <- template$df[seq_len(length(A_vec)), , drop = FALSE]
+
+      history_cols <- colnames(template$H(t))
+      missing_history <- setdiff(history_cols, colnames(H_df))
+
+      if (length(missing_history) > 0L) {
+        stop(
+          "`H_df` is missing required history columns: ",
+          paste(missing_history, collapse = ", ")
+        )
+      }
+
+      df[, history_cols] <- H_df[, history_cols, drop = FALSE]
+      df[[template$A_cols[[t]]]] <- A_vec
+
+      LMTPData$new(
+        data = df,
+        id_col = template$id_col,
+        A_cols = template$A_cols,
+        L_cols = template$L_cols,
+        W_cols = template$W_cols,
+        Y_col = template$Y_col,
+        metadata = template$metadata
+      )
+    },
+
+    augment_for_ratio_classification = function(ds_t,
+                                                t,
+                                                lambda_col = "..lambda") {
+      private$check_t(t)
+
+      A_t_d <- self$policy_seq$apply_t(
+        t = t,
+        A_vec = ds_t$A(t),
+        H_df = ds_t$H(t)
+      )
+
+      df_obs <- ds_t$df
+      df_obs[[lambda_col]] <- 0L
+
+      df_shift <- ds_t$df
+      df_shift[[ds_t$A_cols[[t]]]] <- A_t_d
+      df_shift[[lambda_col]] <- 1L
+
+      df_aug <- rbind(df_obs, df_shift)
+
+      out <- LMTPData$new(
+        data = df_aug,
+        id_col = ds_t$id_col,
+        A_cols = ds_t$A_cols,
+        L_cols = ds_t$L_cols,
+        W_cols = ds_t$W_cols,
+        Y_col = ds_t$Y_col,
+        metadata = ds_t$metadata
+      )
+
+      out$metadata$lambda_col <- lambda_col
+      out$metadata$t <- t
+      out
     },
 
     as_numeric_prediction = function(x, n, label) {

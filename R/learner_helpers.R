@@ -227,38 +227,7 @@ make_nadir_density_g_learners <- function(tau,
   )
 }
 
-private_formula_for_time <- function(formula,
-                                     t,
-                                     outcome_col,
-                                     regressors,
-                                     id_col = NULL,
-                                     exclude_id = TRUE) {
-  if (!is.null(formula)) {
-    if (inherits(formula, "formula")) {
-      return(formula)
-    }
 
-    if (is.list(formula) && length(formula) >= t && inherits(formula[[t]], "formula")) {
-      return(formula[[t]])
-    }
-
-    stop("`formula` must be NULL, a formula, or a list of formulas.")
-  }
-
-  rhs <- regressors
-
-  if (isTRUE(exclude_id) && !is.null(id_col)) {
-    rhs <- setdiff(rhs, id_col)
-  }
-
-  if (length(rhs) == 0L) {
-    return(stats::as.formula(paste(outcome_col, "~ 1")))
-  }
-
-  stats::as.formula(
-    paste(outcome_col, "~", paste(rhs, collapse = " + "))
-  )
-}
 
 make_density_ratio_learner <- function(g_learner,
                                        truncate_density = 1e-12) {
@@ -357,27 +326,17 @@ private_formula_for_time <- function(formula,
   )
 }
 
-#' Build an r learner from a lambda-classification learner
-#'
-#' @description
-#' Converts a classifier for
-#' `lambda = 1` versus `lambda = 0` into a density-ratio learner.
-#'
-#' The supplied `lambda_learner` is trained on an augmented dataset with both
-#' observed and policy-modified treatment rows. It must return a function that
-#' predicts `P(lambda = 1 | A_t, H_t)`.
+
+# Binary lambda learners ---------------------------------------------------
+
+#' Construct one GLM lambda learner for ratio classification
 #'
 #' @export
-make_lambda_ratio_learner <- function(lambda_learner,
-                                      lambda_col = "..lambda",
-                                      clip_probability = 1e-6) {
-  if (!is.function(lambda_learner)) {
-    stop("`lambda_learner` must be a function.")
-  }
-
-  force(lambda_learner)
-  force(lambda_col)
-  force(clip_probability)
+make_glm_lambda_learner <- function(family = stats::binomial(),
+                                    formula = NULL,
+                                    exclude_id = TRUE,
+                                    ...) {
+  glm_args <- list(...)
 
   function(data) {
     if (!inherits(data, "LMTPData")) {
@@ -385,69 +344,69 @@ make_lambda_ratio_learner <- function(lambda_learner,
     }
 
     t <- data$metadata$t
-    policy_seq <- data$metadata$policy_seq
+    lambda_col <- data$metadata$lambda_col
 
-    if (is.null(t)) stop("`data$metadata$t` is missing.")
-    if (is.null(policy_seq)) stop("`data$metadata$policy_seq` is missing.")
-
-    data_aug <- augment_for_lambda_classification(
-      data = data,
-      t = t,
-      policy_seq = policy_seq,
-      lambda_col = lambda_col
-    )
-
-    lambda_predict <- lambda_learner(data_aug)
-
-    if (!is.function(lambda_predict)) {
-      stop("`lambda_learner` must return a prediction function.")
+    if (is.null(t)) {
+      stop("`data$metadata$t` is missing.")
+    }
+    if (is.null(lambda_col)) {
+      stop("`data$metadata$lambda_col` is missing.")
     }
 
-    function(newdata) {
-      u <- .clip_probability(
-        as.numeric(lambda_predict(newdata)),
-        clip_probability = clip_probability
-      )
+    fit_df <- data$AH(t)
+    fit_df[[lambda_col]] <- data$df[[lambda_col]]
 
-      u / (1 - u)
+    fml <- private_formula_for_time(
+      formula = formula,
+      t = t,
+      outcome_col = lambda_col,
+      regressors = colnames(data$AH(t)),
+      id_col = data$id_col,
+      exclude_id = exclude_id
+    )
+
+    fit <- do.call(
+      stats::glm,
+      c(
+        list(
+          formula = fml,
+          family = family,
+          data = fit_df
+        ),
+        glm_args
+      )
+    )
+
+    function(newdata) {
+      if (!inherits(newdata, "LMTPData")) {
+        stop("`newdata` must inherit from `LMTPData`.")
+      }
+
+      as.numeric(stats::predict(
+        fit,
+        newdata = newdata$AH(t),
+        type = "response"
+      ))
     }
   }
 }
 
-#' Augment a time-indexed LMTPData object for ratio classification
+
+#' Construct GLM lambda learners for all time points
 #'
 #' @export
-augment_for_lambda_classification <- function(data,
-                                              t = data$metadata$t,
-                                              policy_seq = data$metadata$policy_seq,
-                                              lambda_col = "..lambda") {
-  if (!inherits(data, "LMTPData")) {
-    stop("`data` must inherit from `LMTPData`.")
-  }
-  if (is.null(t)) stop("`t` is missing.")
-  if (is.null(policy_seq)) stop("`policy_seq` is missing.")
-
-  A_t_d <- policy_seq$apply_t(t, data$A(t), data$H(t))
-
-  df0 <- data$df
-  df0[[lambda_col]] <- 0
-
-  df1 <- data$df
-  df1[[data$A_cols[[t]]]] <- A_t_d
-  df1[[lambda_col]] <- 1
-
-  df_aug <- rbind(df0, df1)
-
-  LMTPData$new(
-    data = df_aug,
-    id_col = data$id_col,
-    A_cols = data$A_cols,
-    L_cols = data$L_cols,
-    W_cols = data$W_cols,
-    Y_col = data$Y_col,
-    metadata = utils::modifyList(
-      data$metadata,
-      list(lambda_col = lambda_col)
-    )
+make_glm_lambda_learners <- function(tau,
+                                     family = stats::binomial(),
+                                     formula = NULL,
+                                     exclude_id = TRUE,
+                                     ...) {
+  repeat_lmtp_learner(
+    make_glm_lambda_learner(
+      family = family,
+      formula = formula,
+      exclude_id = exclude_id,
+      ...
+    ),
+    tau = tau
   )
 }

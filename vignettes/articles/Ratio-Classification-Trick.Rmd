@@ -1,0 +1,223 @@
+---
+title: "Using ratio classification for LMTP density ratios"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using ratio classification for LMTP density ratios}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+set.seed(2026)
+
+library(modulatR)
+library(nadir)
+
+```
+
+For LMTP estimation, the density ratio is
+$$r_t(a_t,h_t)
+=
+\frac{g_t^d(a_t \mid h_t)}
+     {g_t(a_t \mid h_t)}.$$
+     
+Rather than estimating both densities directly, the ratio-classification trick builds an augmented dataset containing observed rows and policy-shifted rows. A binary learner estimates
+$$\Pr(\Lambda = 1 \mid A_t,H_t),$$
+where
+$\Lambda =0$ denotes observed rows and
+$\Lambda = 1$ denotes policy-shifted rows. The nuisance factory then converts this probability to a density-ratio estimate by
+
+$$\hat r_t(a_t,h_t)
+=
+\frac{\hat \Pr(\Lambda=1 \mid a_t,h_t)}
+     {1-\hat \Pr(\Lambda=1 \mid a_t,h_t)}.$$
+     
+This is the classification-based density-ratio strategy described by Díaz et al. for LMTP estimation.
+
+```{r}
+# Data-generating process --------------------------------------------------
+
+set.seed(1)
+
+n <- 1500
+
+W  <- rnorm(n)
+L1 <- 0.5 * W + rnorm(n)
+A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+
+Y <- 1 + 0.5 * W + 0.4 * L1 + 0.3 * L2 + 1.2 * A1 + 0.8 * A2 + rnorm(n)
+
+df <- data.frame(W, L1, A1, L2, A2, Y)
+
+ds <- LMTPData$new(
+  data = df,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+```
+
+# Define an Additive Policy 
+```{r}
+
+policy_shift <- repeat_policy_over_time(
+  mtp_additive_shift(delta = 1),
+  tau = ds$tau()
+)
+
+policy_shift
+```
+
+# Learners
+
+```{r}
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian()
+)
+
+lambda_learners <- make_glm_lambda_learners(
+  tau = ds$tau(),
+  family = stats::binomial()
+)
+```
+
+# Check the ratio-classification machinery directly
+
+This block trains only the ratio nuisance functions and inspects the resulting
+$\hat{\lambda}_t$, $\hat r_t$ and cumulative ratio  $\hat \omega_t = \prod_{s\leq t} \hat r_s$. 
+
+```{r}
+nf_lambda_check <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  lambda_learners = lambda_learners,
+  clip_lambda_probability = 1e-6,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+nf_lambda_check$train_ratios(ds)
+
+ratio_diagnostics <- data.frame(
+  time = rep(seq_len(ds$tau()), each = 3),
+  quantity = rep(c("lambda_obs", "r_obs", "omega"), times = ds$tau()),
+  mean = c(
+    mean(nf_lambda_check$lambda_obs_preds[[1]]),
+    mean(nf_lambda_check$r_obs_preds[[1]]),
+    mean(nf_lambda_check$omega_preds[[1]]),
+    mean(nf_lambda_check$lambda_obs_preds[[2]]),
+    mean(nf_lambda_check$r_obs_preds[[2]]),
+    mean(nf_lambda_check$omega_preds[[2]])
+  ),
+  min = c(
+    min(nf_lambda_check$lambda_obs_preds[[1]]),
+    min(nf_lambda_check$r_obs_preds[[1]]),
+    min(nf_lambda_check$omega_preds[[1]]),
+    min(nf_lambda_check$lambda_obs_preds[[2]]),
+    min(nf_lambda_check$r_obs_preds[[2]]),
+    min(nf_lambda_check$omega_preds[[2]])
+  ),
+  max = c(
+    max(nf_lambda_check$lambda_obs_preds[[1]]),
+    max(nf_lambda_check$r_obs_preds[[1]]),
+    max(nf_lambda_check$omega_preds[[1]]),
+    max(nf_lambda_check$lambda_obs_preds[[2]]),
+    max(nf_lambda_check$r_obs_preds[[2]]),
+    max(nf_lambda_check$omega_preds[[2]])
+  )
+)
+
+ratio_diagnostics
+```
+
+# shape checks / diagnostics
+
+```{r}
+stopifnot(length(nf_lambda_check$lambda_obs_preds) == ds$tau())
+stopifnot(length(nf_lambda_check$r_obs_preds) == ds$tau())
+stopifnot(length(nf_lambda_check$r_d_preds) == ds$tau())
+stopifnot(length(nf_lambda_check$omega_preds) == ds$tau())
+
+stopifnot(all(vapply(nf_lambda_check$lambda_obs_preds, length, integer(1)) == ds$n))
+stopifnot(all(vapply(nf_lambda_check$r_obs_preds, length, integer(1)) == ds$n))
+stopifnot(all(vapply(nf_lambda_check$r_d_preds, length, integer(1)) == ds$n))
+stopifnot(all(vapply(nf_lambda_check$omega_preds, length, integer(1)) == ds$n))
+```
+
+
+# Fit the LMTP TMLE
+
+```{r}
+# TMLE with lambda-learned ratios -----------------------------------------
+
+nf_lambda <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  lambda_learners = lambda_learners,
+  clip_lambda_probability = 1e-6,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+
+fit_lambda <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_lambda,
+  fluctuation = fluctuation
+)
+
+fit_lambda
+```
+
+
+# Compare against using density estimation directly 
+
+For a simple check, we compare the ratio-classification fit with the density-based fit using 
+`nadir::lnr_glm_density()`.
+
+```{r}
+if (requireNamespace("nadir", quietly = TRUE)) {
+  g_learners <- make_nadir_density_g_learners(
+    tau = ds$tau(),
+    learner = nadir::lnr_glm_density
+  )
+
+  nf_density <- LMTPNuisanceFactory$new(
+    policy_seq = policy_shift,
+    m_learners = m_learners,
+    g_learners = g_learners,
+    truncate_density = 1e-12,
+    truncate_ratio = c(1e-6, 1e6)
+  )
+
+  fit_density <- run_tmle_for_LMTP(
+    ds = ds,
+    nuisance_factory = nf_density,
+    fluctuation = fluctuation
+  )
+
+  comparison <- data.frame(
+    ratio_strategy = c("classification", "density"),
+    estimate = c(fit_lambda$estimate, fit_density$estimate),
+    se = c(fit_lambda$se, fit_density$se)
+  )
+
+  comparison
+}
+```
+

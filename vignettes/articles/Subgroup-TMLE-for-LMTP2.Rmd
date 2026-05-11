@@ -1,0 +1,255 @@
+---
+title: "Estimating subgroup-specific LMTP means"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimating subgroup-specific LMTP means}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+set.seed(2026)
+
+library(modulatR)
+library(nadir)
+```
+
+
+This vignette illustrates the simultaneous subgroup TMLE implemented in
+`run_subgroup_tmle_for_LMTP()`.
+
+The target parameters are subgroup-specific LMTP means,
+$$\psi_j = \mathbb E\{Y(\bar A^d) \mid V \in \mathcal A_j\},
+\quad j = 1,\ldots,J.$$
+
+The function targets all subgroup parameters simultaneously using a vector-valued
+clever covariate. This follows the same broad idea as multiple-subgroup targeted
+learning: rather than targeting each subgroup one at a time, we construct a
+matrix of subgroup-scaled clever covariates and update the outcome regression in
+one joint targeting step. Wei et al. discuss the motivation for simultaneous
+multi-subgroup targeting and also propose stabilized refinements for finite
+sample settings; here we use the simpler direct vector-valued targeting approach.
+
+## Truth by Monte Carlo Sample
+
+```{r}
+# Truth by large Monte Carlo sample ----------------------------------------
+
+set.seed(1)
+
+n_truth <- 3e5
+
+W   <- rnorm(n_truth)
+eL1 <- rnorm(n_truth)
+eA1 <- rnorm(n_truth)
+eL2 <- rnorm(n_truth)
+eA2 <- rnorm(n_truth)
+eY  <- rnorm(n_truth)
+
+L1 <- 0.5 * W + eL1
+A1 <- 0.6 * W + 0.8 * L1 + eA1
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + eL2
+A2 <- 0.3 * W + 0.5 * L2 + eA2
+
+Y <- 1 +
+  0.5 * W +
+  0.4 * L1 +
+  0.3 * L2 +
+  1.2 * A1 +
+  0.8 * A2 +
+  eY
+
+A1d <- A1 + 1
+L2d <- 0.4 * W + 0.7 * A1d + 0.6 * L1 + eL2
+A2d <- 0.3 * W + 0.5 * L2d + eA2 + 1
+
+Yd <- 1 +
+  0.5 * W +
+  0.4 * L1 +
+  0.3 * L2d +
+  1.2 * A1d +
+  0.8 * A2d +
+  eY
+
+truth_df <- data.frame(W, L1, A1, L2, A2, Y, Yd)
+
+truth_subgroups <- list(
+  W_positive = function(df) as.numeric(df$W > 0),
+  L1_positive = function(df) as.numeric(df$L1 > 0),
+  high_baseline = function(df) as.numeric(df$W > 0 & df$L1 > 0)
+)
+
+truth_subgroup_means <- vapply(
+  truth_subgroups,
+  function(g) {
+    idx <- g(truth_df) == 1
+    mean(truth_df$Yd[idx])
+  },
+  numeric(1)
+)
+
+truth_subgroup_means
+```
+
+
+## Observed Data
+
+```{r}
+# Observed data ------------------------------------------------------------
+
+set.seed(2)
+
+n <- 8000
+
+W  <- rnorm(n)
+L1 <- 0.5 * W + rnorm(n)
+A1 <- 0.6 * W + 0.8 * L1 + rnorm(n)
+L2 <- 0.4 * W + 0.7 * A1 + 0.6 * L1 + rnorm(n)
+A2 <- 0.3 * W + 0.5 * L2 + rnorm(n)
+
+Y <- 1 +
+  0.5 * W +
+  0.4 * L1 +
+  0.3 * L2 +
+  1.2 * A1 +
+  0.8 * A2 +
+  rnorm(n)
+
+df <- data.frame(W, L1, A1, L2, A2, Y)
+
+ds <- LMTPData$new(
+  data = df,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+```
+
+
+## Define policy and subgroups
+
+```{r}
+# Policy and subgroups -----------------------------------------------------
+
+policy_shift <- repeat_policy_over_time(
+  mtp_additive_shift(delta = 1),
+  tau = ds$tau()
+)
+
+subgroup_funs <- list(
+  W_positive = function(df) as.numeric(df$W > 0),
+  L1_positive = function(df) as.numeric(df$L1 > 0),
+  high_baseline = function(df) as.numeric(df$W > 0 & df$L1 > 0)
+)
+
+subgroup_mat <- modulatR:::.make_subgroup_matrix(ds, subgroup_funs)
+
+colMeans(subgroup_mat)
+```
+
+## Nuisance Learners
+
+```{r}
+# Nuisance learners --------------------------------------------------------
+
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian()
+)
+
+g_learners <- make_nadir_density_g_learners(
+  tau = ds$tau(),
+  learner = nadir::lnr_glm_density
+)
+```
+
+## Fit Subgroup LMTP TMLE
+
+```{r}
+# Nuisance factory and fluctuation -----------------------------------------
+
+nf_shift <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+
+# Subgroup TMLE ------------------------------------------------------------
+
+fit_subgroup <- run_subgroup_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift,
+  subgroup_funs = subgroup_funs,
+  fluctuation = fluctuation
+)
+
+fit_subgroup
+```
+
+## Comparison with Truth
+
+```{r}
+# Comparison with Monte Carlo truth ----------------------------------------
+
+comparison <- data.frame(
+  subgroup = names(truth_subgroup_means),
+  truth = as.numeric(truth_subgroup_means),
+  estimate = as.numeric(fit_subgroup$estimate),
+  se = as.numeric(fit_subgroup$se),
+  lower = as.numeric(fit_subgroup$ci["lower", ]),
+  upper = as.numeric(fit_subgroup$ci["upper", ])
+)
+
+comparison$error <- comparison$estimate - comparison$truth
+
+comparison
+```
+
+
+## Inspect the EIF Matrix
+
+```{r}
+# EIF matrix ---------------------------------------------------------------
+
+dim(fit_subgroup$eif)
+colnames(fit_subgroup$eif)
+
+head(fit_subgroup$eif)
+
+apply(fit_subgroup$eif, 2, mean)
+apply(fit_subgroup$eif, 2, var)
+```
+
+## Check on the stored objects
+
+```{r}
+# Stored fitted quantities -------------------------------------------------
+
+names(fit_subgroup$m_init)
+names(fit_subgroup$m_star)
+
+length(fit_subgroup$m_init$m_obs)
+length(fit_subgroup$m_star$m_d)
+
+str(fit_subgroup$m_init, max.level = 1)
+str(fit_subgroup$m_star, max.level = 1)
+```
+
+

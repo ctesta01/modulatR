@@ -1,8 +1,8 @@
 ---
-title: "Conditional LMTPs for Subgroup Specific Effects"
+title: "Conditional LMTPs for Rare Subgroups"
 output: rmarkdown::html_vignette
 vignette: >
-  %\VignetteIndexEntry{Conditional LMTPs for Subgroup Specific Effects}
+  %\VignetteIndexEntry{Conditional LMTPs for Rare Subgroups}
   %\VignetteEngine{knitr::rmarkdown}
   %\VignetteEncoding{UTF-8}
 ---
@@ -17,13 +17,38 @@ knitr::opts_chunk$set(
   message = FALSE
 )
 
-set.seed(1)
+set.seed(2026)
 ```
 
-# Conditional LMTPs for Subgroup Specific Effects
+# Conditional LMTPs for Rare Subgroups
 
 This vignette illustrates why it can be inefficient to estimate subgroup-specific
 longitudinal modified treatment policy effects by simply stratifying the data.
+
+The problem is most severe when the subgroup is rare. If a subgroup contains only
+10% of the cohort, then a naive stratified analysis discards 90% of the observed
+data before estimating the treatment and outcome nuisance functions. In contrast,
+the conditional LMTP approach uses the full observed data to estimate the
+longitudinal nuisance functions, constructs doubly robust pseudo-outcomes, and
+then summarizes the pseudo-outcomes within the subgroup.
+
+The target parameter in this vignette is the rare-subgroup LMTP contrast
+
+\[
+  \tau_{\mathrm{rare}}
+  =
+  \mathbb E\{Y(\bar A^d) - Y(\bar A) \mid G = 1\},
+\]
+
+where \(G = 1\{W > q_{0.90}\}\). Thus, only about 10% of the population belongs to
+the subgroup of scientific interest.
+
+The shifted policy is an additive longitudinal policy,
+
+\[
+  d_t(a_t, h_t) = a_t + 1,
+  \qquad t = 1,2.
+\]
 
 # Packages
 
@@ -46,13 +71,13 @@ The treatment effect is allowed to vary with \(W\), so the rare subgroup has a
 different average effect than the full population.
 
 ```{r}
+rare_cutoff <- qnorm(0.90)
 
 generate_lmtp_data <- function(n, seed = NULL) {
   if (!is.null(seed)) set.seed(seed)
 
   W <- rnorm(n)
-  quantiles <- c(-Inf, quantile(W, seq(0, 1, length.out = 6))[2:5], Inf)
-  G <- cut(W, quantiles, include.lowest=TRUE)
+  G <- as.numeric(W > rare_cutoff)
 
   eL1 <- rnorm(n)
   eA1 <- rnorm(n)
@@ -60,18 +85,19 @@ generate_lmtp_data <- function(n, seed = NULL) {
   eA2 <- rnorm(n)
   eY  <- rnorm(n)
 
-  L1 <- eL1
+  L1 <- 0.5 * W + eL1
 
-  A1 <- 0.7 * L1 + eA1
+  A1 <- 0.4 * W + 0.7 * L1 + eA1
 
-  L2 <- 0.5 * L1 + 0.7 * A1 + eL2
+  L2 <- 0.3 * W + 0.5 * L1 + 0.7 * A1 + eL2
 
-  A2 <- 0.4 * L2 + eA2
+  A2 <- 0.3 * W + 0.4 * L2 + eA2
 
-  beta1 <- 0.8 
-  beta2 <- 0.6 
+  beta1 <- 0.8 + 0.4 * W
+  beta2 <- 0.6 + 0.2 * W
 
   Y <- 1 +
+    0.5 * W +
     0.3 * L1 +
     0.5 * L2 +
     beta1 * A1 +
@@ -93,9 +119,9 @@ generate_lmtp_data <- function(n, seed = NULL) {
 
 # Monte Carlo truth
 
-Because this is a simulation, we can approximate the true subgroup specific 
-mean outcomes by simulating a very large population and applying the 
-structural equations under the shifted policy.
+Because this is a simulation, we can approximate the true rare-subgroup contrast
+by simulating a very large population and applying the structural equations under
+the shifted policy.
 
 Under the policy \(A_1^d = A_1 + 1\), the downstream covariate \(L_2\), treatment
 \(A_2\), and final outcome are recomputed under the same exogenous errors.
@@ -105,9 +131,7 @@ compute_truth <- function(n_truth = 5e5, delta = 1, seed = 1) {
   set.seed(seed)
 
   W <- rnorm(n_truth)
-  quantiles <- c(-Inf, quantile(W, seq(0, 1, length.out = 6))[2:5], Inf)
-  G <- cut(W, quantiles, include.lowest=TRUE)
-  
+  G <- as.numeric(W > rare_cutoff)
 
   eL1 <- rnorm(n_truth)
   eA1 <- rnorm(n_truth)
@@ -115,16 +139,17 @@ compute_truth <- function(n_truth = 5e5, delta = 1, seed = 1) {
   eA2 <- rnorm(n_truth)
   eY  <- rnorm(n_truth)
 
-  L1 <- eL1
+  L1 <- 0.5 * W + eL1
 
-  A1 <- 0.7 * L1 + eA1
-  L2 <- 0.5 * L1 + 0.7 * A1 + eL2
-  A2 <- 0.4 * L2 + eA2
+  A1 <- 0.4 * W + 0.7 * L1 + eA1
+  L2 <- 0.3 * W + 0.5 * L1 + 0.7 * A1 + eL2
+  A2 <- 0.3 * W + 0.4 * L2 + eA2
 
-  beta1 <- 0.8
-  beta2 <- 0.6
+  beta1 <- 0.8 + 0.4 * W
+  beta2 <- 0.6 + 0.2 * W
 
   Y <- 1 +
+    0.5 * W +
     0.3 * L1 +
     0.5 * L2 +
     beta1 * A1 +
@@ -133,25 +158,22 @@ compute_truth <- function(n_truth = 5e5, delta = 1, seed = 1) {
 
   # Counterfactual shifted trajectory.
   A1d <- A1 + delta
-  L2d <- 0.5 * L1 + 0.7 * A1d + eL2
-  A2d <- 0.4 * L2d + eA2 + delta
+  L2d <- 0.3 * W + 0.5 * L1 + 0.7 * A1d + eL2
+  A2d <- 0.3 * W + 0.4 * L2d + eA2 + delta
 
   Yd <- 1 +
+    0.5 * W +
     0.3 * L1 +
     0.5 * L2d +
     beta1 * A1d +
     beta2 * A2d +
     eY
 
-  df <- tibble::tibble(G, Y, Yd) 
-  summary_df <- df |> group_by(G) |> summarize(EY = mean(Y), EYd = mean(Yd),
-                                               EYd_minus_EY = EYd - EY)
-  
-  summary_df
+  mean((Yd - Y)[G == 1])
 }
 
-subgroup_truths <- compute_truth()
-subgroup_truths
+truth_rare <- compute_truth()
+truth_rare
 ```
 
 # Helper functions
@@ -194,31 +216,23 @@ make_nuisance_factory <- function(ds, delta = 1) {
     tau = ds$tau(),
     learner = nadir::lnr_glm_density
   )
-  
-  lambda_learners <- make_glm_lambda_learners(
-    tau = ds$tau(),
-    family = binomial(link='logit'))
 
   LMTPNuisanceFactory$new(
     policy_seq = policy_shift,
     m_learners = m_learners,
-    # g_learners = g_learners,
-    lambda_learners = lambda_learners,
+    g_learners = g_learners,
     truncate_density = 1e-8,
     truncate_ratio = c(1e-4, 1e4)
   )
 }
 
-subgroups <- list(
-  `G_eq_1` = function(df) as.integer(df$G) == 1,
-  `G_eq_2` = function(df) as.integer(df$G) == 2,
-  `G_eq_3` = function(df) as.integer(df$G) == 3,
-  `G_eq_4` = function(df) as.integer(df$G) == 4,
-  `G_eq_5` = function(df) as.integer(df$G) == 5
+rare_subgroup <- list(
+  rare = function(df) as.numeric(df$G == 1)
 )
 
 fluctuation <- LMTPFluctuationSubmodel$new(
-  family = stats::gaussian()
+  family = stats::gaussian(),
+  use_intercept = TRUE
 )
 ```
 
@@ -232,25 +246,35 @@ estimate_conditional_lmtp <- function(df, truth, delta = 1) {
   ds <- make_ds(df)
   nf <- make_nuisance_factory(ds, delta = delta)
 
-  fit <- run_subgroup_tmle_for_LMTP(
+  fit <- run_drlearner_for_subgroup_LMTP(
     ds = ds,
     nuisance_factory = nf,
     fluctuation = fluctuation,
-    subgroup_funs = subgroups,
+    metalearner = make_lm_metalearner(),
+    conditioning_cols = "W",
+    subgroup_funs = rare_subgroup,
     alpha = 0.05
   )
 
-  out <- 
-    tibble::tibble(
+  out <- fit$subgroup_summary |>
+    filter(subgroup == "rare") |>
+    transmute(
       method = "Conditional LMTP",
-      estimate = fit$estimate,
-      se = fit$se,
-      lower = estimate + qnorm(0.025) * se,
-      upper = estimate + qnorm(0.975) * se,
-      G = as.integer(stringr::str_extract(fit$subgroup_names, pattern = "[0-9]+"))
+      estimate = contrast_est,
+      se = contrast_se,
+      lower = contrast_est - qnorm(0.975) * contrast_se,
+      upper = contrast_est + qnorm(0.975) * contrast_se,
+      n_g = n_g,
+      prevalence = prevalence
     )
-  
-  out
+
+  out |>
+    mutate(
+      truth = truth,
+      covered = lower <= truth & truth <= upper,
+      rejects_zero = lower > 0 | upper < 0,
+      ci_width = upper - lower
+    )
 }
 ```
 
@@ -263,50 +287,74 @@ subgroup observations.
 
 ```{r}
 estimate_naive_stratified_lmtp <- function(df, truth, delta = 1) {
-  results <- list()
-  for (g in 1:5) {
-    
-    df_g <- df |>
-      filter(as.integer(G) == g) |>
-      select(-G) |> 
-      mutate(id = seq_len(n()))
-    
-    stratified_estimation <- function(df_g) {
-      
-      ds_g <- LMTPData$new(
-        data = df_g,
-        id_col = "id",
-        A_cols = c("A1", "A2"),
-        L_cols = list("L1", "L2"),
-        W_cols = c("W"),
-        Y_col = "Y"
-      )
-      
-      nf_g <- make_nuisance_factory(ds_g, delta = delta)
-      
-      fit_g <- run_tmle_for_LMTP(ds = ds_g, 
-        nuisance_factory = nf_g,
-        fluctuation = fluctuation
-      )
-      
-      out <- list(
-        method = 'Naive Stratified LMTP',
-        estimate = fit_g$estimate,
-        se = fit_g$se,
-        lower = fit_g$ci[1],
-        upper = fit_g$ci[2])
-      
-      out
-    }
-  
-    results_g <- stratified_estimation(df_g)
-    
-    results_g$G <- g
-    
-    results[[length(results)+1]] <- results_g
+  df_g <- df |>
+    filter(G == 1) |>
+    mutate(id = seq_len(n()))
+
+  if (nrow(df_g) < 25) {
+    return(tibble(
+      method = "Naive stratified",
+      estimate = NA_real_,
+      se = NA_real_,
+      lower = NA_real_,
+      upper = NA_real_,
+      n_g = nrow(df_g),
+      prevalence = mean(df$G == 1),
+      truth = truth,
+      covered = NA,
+      rejects_zero = NA,
+      ci_width = NA_real_
+    ))
   }
-  results <- bind_rows(results)
-  results
+
+  tryCatch({
+    ds_g <- make_ds(df_g)
+    nf_g <- make_nuisance_factory(ds_g, delta = delta)
+
+    fit_g <- run_drlearner_for_subgroup_LMTP(
+      ds = ds_g,
+      nuisance_factory = nf_g,
+      fluctuation = fluctuation,
+      metalearner = make_lm_metalearner(),
+      conditioning_cols = "W",
+      subgroup_funs = list(all = function(df) rep(1, nrow(df))),
+      alpha = 0.05
+    )
+
+    out <- fit_g$subgroup_summary |>
+      filter(subgroup == "all") |>
+      transmute(
+        method = "Naive stratified",
+        estimate = contrast_est,
+        se = contrast_se,
+        lower = contrast_est - qnorm(0.975) * contrast_se,
+        upper = contrast_est + qnorm(0.975) * contrast_se,
+        n_g = nrow(df_g),
+        prevalence = mean(df$G == 1)
+      )
+
+    out |>
+      mutate(
+        truth = truth,
+        covered = lower <= truth & truth <= upper,
+        rejects_zero = lower > 0 | upper < 0,
+        ci_width = upper - lower
+      )
+  }, error = function(e) {
+    tibble(
+      method = "Naive stratified",
+      estimate = NA_real_,
+      se = NA_real_,
+      lower = NA_real_,
+      upper = NA_real_,
+      n_g = nrow(df_g),
+      prevalence = mean(df$G == 1),
+      truth = truth,
+      covered = NA,
+      rejects_zero = NA,
+      ci_width = NA_real_
+    )
+  })
 }
 ```
 
@@ -318,9 +366,6 @@ one_rep <- function(n, rep_id, truth, delta = 1) {
     n = n,
     seed = 100000 + 1000 * n + rep_id
   )
-  
-  subgroup_truths$G <- as.integer(subgroup_truths$G)
-  subgroup_truths_for_join <- subgroup_truths |> select(G, EYd)
 
   bind_rows(
     estimate_conditional_lmtp(df, truth = truth, delta = delta),
@@ -329,12 +374,10 @@ one_rep <- function(n, rep_id, truth, delta = 1) {
     mutate(
       n = n,
       rep_id = rep_id
-    ) |> 
-    left_join(subgroup_truths_for_join, by = 'G') |> 
-    mutate(covers = lower <= EYd & EYd <= upper)}
+    )
+}
 
-
-one_rep(n = 500, rep_id = 1, truth = subgroup_truths)
+one_rep(n = 500, rep_id = 1, truth = truth_rare)
 ```
 
 # Simulation across sample sizes
@@ -343,7 +386,7 @@ For a real simulation study, increase `B` to 500 or 1000. For a small vignette,
 we keep `B` modest.
 
 ```{r}
-sample_sizes <- (seq(8, 30, length.out=6))^2
+sample_sizes <- c(250, 500, 1000, 2000)
 B <- 250
 
 sim_results <- tidyr::crossing(
@@ -353,12 +396,12 @@ sim_results <- tidyr::crossing(
   mutate(result = purrr::map2(
     n,
     rep_id,
-    ~ one_rep(n = .x, rep_id = .y, truth = subgroup_truths)
+    ~ one_rep(n = .x, rep_id = .y, truth = truth_rare)
   )) |>
   select(result) |>
   tidyr::unnest(result)
 
-# head(sim_results)
+head(sim_results)
 ```
 
 # Operating characteristics
@@ -370,14 +413,18 @@ interval width.
 ```{r}
 sim_summary <- sim_results |>
   filter(!is.na(estimate)) |>
-  group_by(n, method, G) |>
+  group_by(n, method) |>
   summarize(
-    bias = mean(estimate - EYd),
-    rmse = sqrt(mean((estimate - EYd)^2)),
+    mean_subgroup_n = mean(n_g),
+    mean_prevalence = mean(prevalence),
+    bias = mean(estimate - truth),
+    rmse = sqrt(mean((estimate - truth)^2)),
     empirical_sd = sd(estimate),
     mean_se = mean(se),
-    coverage = mean(covers),
-    mean_ci_width = mean(abs(upper - lower)),
+    coverage = mean(covered),
+    power = mean(rejects_zero),
+    mean_ci_width = mean(ci_width),
+    failed_reps = B - n(),
     .groups = "drop"
   )
 
@@ -399,16 +446,14 @@ ggplot(sim_summary, aes(x = n, y = coverage, group = method, linetype = method))
   geom_point(size = 2) +
   scale_x_continuous(breaks = sample_sizes) +
   coord_cartesian(ylim = c(0, 1)) +
-  facet_wrap(~G) + 
   labs(
     x = "Total sample size",
     y = "Empirical 95% coverage",
     linetype = NULL,
-    title = "Subgroup coverage across sample sizes",
-    subtitle = "The naive stratified approach estimates nuisance functions using only each subgroup one at a time."
+    title = "Rare-subgroup coverage across sample sizes",
+    subtitle = "The naive stratified approach estimates nuisance functions using only the rare subgroup."
   ) +
-  theme_minimal(base_size = 12) + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme_minimal(base_size = 12)
 ```
 
 # Power
@@ -417,18 +462,18 @@ Because the true subgroup contrast is positive, we can also compare the
 probability that the 95% confidence interval excludes zero.
 
 ```{r}
-# ggplot(sim_summary, aes(x = n, y = power, group = method, linetype = method)) +
-#   geom_line(linewidth = 0.8) +
-#   geom_point(size = 2) +
-#   scale_x_continuous(breaks = sample_sizes) +
-#   coord_cartesian(ylim = c(0, 1)) +
-#   labs(
-#     x = "Total sample size",
-#     y = "Power: 95% CI excludes zero",
-#     linetype = NULL,
-#     title = "Rare-subgroup power across sample sizes"
-#   ) +
-#   theme_minimal(base_size = 12)
+ggplot(sim_summary, aes(x = n, y = power, group = method, linetype = method)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = sample_sizes) +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(
+    x = "Total sample size",
+    y = "Power: 95% CI excludes zero",
+    linetype = NULL,
+    title = "Rare-subgroup power across sample sizes"
+  ) +
+  theme_minimal(base_size = 12)
 ```
 
 # Precision
@@ -446,17 +491,15 @@ ggplot(sim_summary, aes(x = n, y = mean_ci_width, group = method, linetype = met
     x = "Total sample size",
     y = "Mean 95% CI width",
     linetype = NULL,
-    title = "Confidence interval width for subgroup LMTP contrast"
+    title = "Confidence interval width for rare-subgroup LMTP contrast"
   ) +
-  theme_minimal(base_size = 12) + 
-  facet_wrap(~ G)
+  theme_minimal(base_size = 12)
 ```
 
 # RMSE
 
 ```{r}
-sim_summary |> filter(n > 100) |> 
-ggplot(aes(x = n, y = rmse, group = method, linetype = method)) +
+ggplot(sim_summary, aes(x = n, y = rmse, group = method, linetype = method)) +
   geom_line(linewidth = 0.8) +
   geom_point(size = 2) +
   scale_x_continuous(breaks = sample_sizes) +
@@ -464,9 +507,24 @@ ggplot(aes(x = n, y = rmse, group = method, linetype = method)) +
     x = "Total sample size",
     y = "Root mean squared error",
     linetype = NULL,
-    title = "RMSE for subgroup LMTP contrast"
+    title = "RMSE for rare-subgroup LMTP contrast"
   ) +
-  scale_y_log10() +
-  theme_minimal(base_size = 12) + 
-  facet_wrap(~G) 
+  theme_minimal(base_size = 12)
 ```
+
+# Interpretation
+
+This simulation is designed to isolate a simple finite-sample phenomenon. The
+rare subgroup contains only about 10% of the cohort. At \(n = 250\), this means
+that the naive stratified estimator typically has only about 25 observations
+with which to estimate all treatment and outcome nuisance functions. That is a
+hard problem, even when the nuisance models are correctly specified.
+
+The conditional LMTP approach is not magic: the final subgroup contrast is still
+a rare-subgroup estimand, so its uncertainty must reflect the rarity of the
+subgroup. However, it avoids an unnecessary loss of information by estimating the
+longitudinal nuisance functions in the full sample before constructing
+doubly robust pseudo-outcomes. In small and moderate samples, this can improve
+coverage, reduce RMSE, and increase power relative to a naive strategy that
+throws away most of the data at the nuisance-estimation stage.
+

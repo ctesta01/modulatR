@@ -1,0 +1,136 @@
+\documentclass[tikz,border=2mm]{standalone}
+\usetikzlibrary{arrows.meta,calc,shapes.geometric}
+
+\begin{document}
+
+\begin{tikzpicture}[>=Latex]
+
+% Colors
+\definecolor{hexbg}{RGB}{247,247,245}
+\definecolor{Ldraw}{RGB}{74,115,64}
+\definecolor{Lfill}{RGB}{229,238,225}
+\definecolor{Adraw}{RGB}{47,88,163}
+\definecolor{Afill}{RGB}{227,234,248}
+\definecolor{Ydraw}{RGB}{70,130,120}
+\definecolor{Yfill}{RGB}{226,240,236}
+\definecolor{mainarrow}{RGB}{60,60,60}
+\definecolor{lightarrow}{RGB}{135,135,135}
+
+% Styles
+\tikzset{
+  Lnode/.style={
+    circle,
+    draw=Ldraw,
+    fill=Lfill,
+    line width=1pt,
+    minimum size=6mm,
+    inner sep=0pt,
+    font=\normalsize
+  },
+  Anode/.style={
+    circle,
+    draw=Adraw,
+    fill=Afill,
+    line width=1pt,
+    minimum size=6mm,
+    inner sep=0pt,
+    font=\normalsize
+  },
+  Ynode/.style={
+    circle,
+    draw=Ydraw,
+    fill=Yfill,
+    line width=1pt,
+    minimum size=6mm,
+    inner sep=0pt,
+    font=\normalsize
+  },
+  direct/.style={
+    ->,
+    line width=1.2pt,
+    draw=mainarrow
+  },
+  Larrow/.style={
+    ->,
+    line width=0.9pt,
+    draw=Ldraw!85
+  },
+  Aarrow/.style={
+    ->,
+    line width=0.9pt,
+    draw=Adraw!85
+  }
+}
+
+% Hexagon
+\node[
+  regular polygon,
+  regular polygon sides=6,
+  shape border rotate=30,
+  draw=black,
+  fill=hexbg,
+  line width=1.5pt,
+  minimum width=10.5cm,
+  minimum height=9.2cm,
+  inner sep=0pt
+] (hex) at (0,0) {};
+
+% Title
+\node[
+  font=\ttfamily\bfseries\fontsize{26}{28}\selectfont
+] at ($(hex.center)+(0,2.15)$) {\{modulatR\}};
+
+% Graph
+\begin{scope}[shift={($(hex.center)+(0,-0.55)$)}]
+
+  % Nodes
+  \node[Lnode] (L1) at (-3.75, 0.65) {$L_1$};
+  \node[Anode] (A1) at (-2.95,-0.10) {$A_1$};
+
+  \node[Lnode] (L2) at (-1.95, 0.65) {$L_2$};
+  \node[Anode] (A2) at (-1.15,-0.10) {$A_2$};
+
+  \node at (0.15,0.17) {\fontsize{24}{24}\selectfont $\cdots$};
+
+  \node[Lnode] (Lt) at (2.05, 0.65) {$L_t$};
+  \node[Anode] (At) at (2.85,-0.10) {$A_t$};
+
+  \node[Ynode] (Y) at (4.10,0.15) {$Y$};
+
+  % Direct/local arrows (thicker)
+  \draw[direct] (L1) to[bend right=18] (A1);
+  \draw[direct] (A1) to[bend left=18] (L2);
+  \draw[direct] (L2) to[bend right=18] (A2);
+  \draw[direct] (A2) to[bend left=12] (Lt);
+  \draw[direct] (Lt) to[bend right=18] (At);
+  \draw[direct] (At) to[bend left=10] (Y);
+
+  % L-history arrows to future L's
+  \draw[Larrow] (L1) to[bend left=12] (L2);
+  \draw[Larrow] (L1) to[bend left=24] (Lt);
+  \draw[Larrow] (L2) to[bend left=14] (Lt);
+
+  % L-history arrows to future A's
+  \draw[Larrow] (L1) to[bend right=24] (A2);
+  \draw[Larrow] (L1) to[bend right=34] (At);
+  \draw[Larrow] (L2) to[bend right=24] (At);
+
+  % L-history arrows to Y
+  \draw[Larrow] (L1) to[bend left=34] (Y);
+  \draw[Larrow] (L2) to[bend left=22] (Y);
+  \draw[Larrow] (Lt) to[bend left=18] (Y);
+
+  % A-history arrows to future A's
+  \draw[Aarrow] (A1) to[bend left=10] (A2);
+  \draw[Aarrow] (A1) to[bend left=22] (At);
+  \draw[Aarrow] (A2) to[bend left=14] (At);
+
+  % A-history arrows to Y
+  \draw[Aarrow] (A1) to[bend left=30] (Y);
+  \draw[Aarrow] (A2) to[bend left=20] (Y);
+
+\end{scope}
+
+\end{tikzpicture}
+
+\end{document}

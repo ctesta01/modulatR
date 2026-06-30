@@ -26,7 +26,6 @@
 #' stabilization; that should live in a separate fluctuation or targeting object.
 #'
 #' @export
-#' LMTP vector fluctuation submodel
 #'
 #' @description
 #' `LMTPFluctuationSubmodel` implements the targeting step for vector-valued

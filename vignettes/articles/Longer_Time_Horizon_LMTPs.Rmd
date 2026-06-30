@@ -1,0 +1,602 @@
+---
+title: "Estimating a 12-timepoint LMTP under a known data-generating process"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimating a 12-timepoint LMTP under a known data-generating process}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+set.seed(2026)
+library(modulatR)
+library(ggplot2)
+```
+
+# Overview
+
+This vignette estimates a longitudinal modified treatment policy (LMTP) with
+12 treatment times. The observed data have the structure
+
+\[
+  O =
+  (W, L_1, A_1, L_2, A_2, \ldots, L_{12}, A_{12}, Y),
+\]
+
+where \(W\) is a baseline covariate, \(L_t\) is a time-varying covariate,
+\(A_t\) is a continuous treatment, and \(Y\) is a final continuous outcome.
+
+We consider the additive modified treatment policy
+
+\[
+  d_t(a_t, h_t) = a_t + 1,
+  \qquad t = 1, \ldots, 12.
+\]
+
+The target parameter is
+
+\[
+  \mathbb{E}(Y^{\bar d}),
+\]
+
+and we compare it to the observed-data mean \(\mathbb{E}(Y)\). Since the
+data-generating process is known, we also compute the truth by Monte Carlo.
+
+# Data-generating process
+
+The DGP is intentionally linear and correctly specified by the GLM nuisance
+models used below. This makes the vignette a clean diagnostic for whether the
+12-timepoint LMTP machinery is behaving as expected.
+
+At each time \(t\),
+
+\[
+  L_t =
+  0.35 W + 0.25 L_{t-1} + 0.50 A_{t-1} + \varepsilon_{L,t},
+\]
+
+and
+
+\[
+  A_t =
+  0.30 W + 0.45 L_t + 0.25 A_{t-1} + \varepsilon_{A,t},
+\]
+
+with \(L_0 = 0\) and \(A_0 = 0\). The outcome is
+
+\[
+  Y =
+  1 + 0.5 W
+    + \sum_{t = 1}^{12} \beta_{L,t} L_t
+    + \sum_{t = 1}^{12} \beta_{A,t} A_t
+    + \varepsilon_Y.
+\]
+
+The treatment effect coefficients decay mildly over time, so that earlier
+treatments have somewhat larger effects than later treatments.
+
+```{r}
+library(nadir)
+
+# -------------------------------------------------------------------------
+# Data generator
+# -------------------------------------------------------------------------
+
+generate_lmtp_data <- function(n,
+                               tau = 12,
+                               delta = NULL,
+                               seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  W <- rnorm(n)
+
+  eL <- matrix(rnorm(n * tau), nrow = n, ncol = tau)
+  eA <- matrix(rnorm(n * tau), nrow = n, ncol = tau)
+  eY <- rnorm(n)
+
+  L <- matrix(NA_real_, nrow = n, ncol = tau)
+  A <- matrix(NA_real_, nrow = n, ncol = tau)
+
+  colnames(L) <- paste0("L", seq_len(tau))
+  colnames(A) <- paste0("A", seq_len(tau))
+
+  prev_L <- rep(0, n)
+  prev_A <- rep(0, n)
+
+  for (t in seq_len(tau)) {
+    L[, t] <- 0.35 * W + .65 * prev_L + .45 * prev_A + eL[, t]
+    A[, t] <- 0.30 * W + .91 * L[, t] + .95 * prev_A + eA[, t]
+
+    if (!is.null(delta)) {
+      A[, t] <- A[, t] + delta
+    }
+
+    prev_L <- L[, t]
+    prev_A <- A[, t]
+  }
+
+  beta_L <- 0.20 + 0.10 * exp(-0.15 * (seq_len(tau) - 1))
+  beta_A <- 0.60 + 0.60 * exp(-0.15 * (seq_len(tau) - 1))
+
+  Y <- 1 +
+    0.50 * W +
+    as.numeric(L %*% beta_L) +
+    as.numeric(A %*% beta_A) +
+    eY
+
+  data.frame(
+    W = W,
+    as.data.frame(L),
+    as.data.frame(A),
+    Y = Y,
+    check.names = FALSE
+  )
+}
+```
+
+# Truth by Monte Carlo
+
+Because this is a known DGP, we can approximate the truth by simulating a large
+sample under the observed law and under the shifted law. The shifted law uses
+the same structural equations but applies \(A_t \mapsto A_t + 1\) at every
+timepoint.
+
+For package vignettes, we use a moderately large Monte Carlo sample to keep
+runtime manageable. If you are running this interactively, increasing
+`n_truth` will reduce Monte Carlo error.
+
+```{r}
+# -------------------------------------------------------------------------
+# Truth by large Monte Carlo sample
+# -------------------------------------------------------------------------
+
+set.seed(1)
+
+tau <- 12
+delta <- 1
+n_truth <- 2e5
+
+truth_obs <- generate_lmtp_data(
+  n = n_truth,
+  tau = tau,
+  delta = NULL
+)
+
+truth_shift <- generate_lmtp_data(
+  n = n_truth,
+  tau = tau,
+  delta = delta
+)
+
+truth <- c(
+  EY = mean(truth_obs$Y),
+  EYd = mean(truth_shift$Y),
+  diff = mean(truth_shift$Y - truth_obs$Y)
+)
+
+truth
+```
+
+# Observed data
+
+Now we generate one observed dataset and wrap it in an `LMTPData` object. The
+important bookkeeping step is that `A_cols` is a character vector of treatment
+names, while `L_cols` is a list whose \(t\)-th element gives the covariates
+available at time \(t\).
+
+```{r}
+# -------------------------------------------------------------------------
+# Observed data
+# -------------------------------------------------------------------------
+
+set.seed(2)
+
+n <- 8000
+
+df <- generate_lmtp_data(
+  n = n,
+  tau = tau,
+  delta = NULL
+)
+
+A_cols <- paste0("A", seq_len(tau))
+L_cols <- as.list(paste0("L", seq_len(tau)))
+
+ds <- LMTPData$new(
+  data = df,
+  A_cols = A_cols,
+  L_cols = L_cols,
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+```
+
+We can inspect the histories at early and late timepoints. The history
+\(H_t\) contains baseline covariates, time-varying covariates through time
+\(t\), and prior treatments through time \(t - 1\).
+
+```{r}
+head(ds$H(1))
+head(ds$H(12))
+head(ds$AH(12))
+```
+
+# Policies
+
+We define two policy sequences. The first adds one unit to every treatment at
+every time. The second is the identity policy, which estimates the observed-law
+mean using the same machinery.
+
+```{r}
+# -------------------------------------------------------------------------
+# Policies
+# -------------------------------------------------------------------------
+
+policy_shift <- repeat_policy_over_time(
+  mtp_additive_shift(delta = delta),
+  tau = ds$tau()
+)
+
+policy_identity <- identity_policy(
+  A_type = "continuous",
+  tau = ds$tau()
+)
+
+policy_shift
+policy_identity
+```
+
+It is often useful to check the implied treatment shifts directly.
+
+```{r}
+shifted_treatments <- policy_shift$apply_to_data(ds)
+
+head(shifted_treatments[, c(
+  ds$id_col,
+  "A1", "A1_star",
+  "A6", "A6_star",
+  "A12", "A12_star"
+)])
+```
+
+# Learners
+
+For this simple known DGP, correctly specified GLMs are adequate. We use GLMs
+for the sequential outcome regressions and `nadir::lnr_glm_density` for the
+conditional treatment densities.
+
+```{r}
+# -------------------------------------------------------------------------
+# Learners
+# -------------------------------------------------------------------------
+
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian()
+)
+
+g_learners <- make_nadir_density_g_learners(
+  tau = ds$tau(),
+  learner = nadir::lnr_glm_density
+)
+```
+
+# Nuisance factories and fluctuation model
+
+The nuisance factory stores the policy sequence and the per-time learners used
+for the sequential regressions and density ratios. Since the outcome is
+continuous, we use a Gaussian fluctuation submodel.
+
+```{r}
+# -------------------------------------------------------------------------
+# Nuisance factories
+# -------------------------------------------------------------------------
+
+nf_shift <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+nf_identity <- LMTPNuisanceFactory$new(
+  policy_seq = policy_identity,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+
+fluctuation
+```
+
+# Fit the TMLEs
+
+We now estimate both \(\mathbb{E}(Y^{\bar d})\) and \(\mathbb{E}(Y)\).
+
+```{r}
+# -------------------------------------------------------------------------
+# Fit TMLEs
+# -------------------------------------------------------------------------
+
+fit_shift <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift,
+  fluctuation = fluctuation
+)
+
+fit_identity <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_identity,
+  fluctuation = fluctuation
+)
+
+fit_shift
+fit_identity
+```
+
+# Difference contrast
+
+Finally, we contrast the shifted-policy mean against the identity-policy mean.
+
+```{r}
+# -------------------------------------------------------------------------
+# Difference contrast
+# -------------------------------------------------------------------------
+
+fit_diff <- lmtp_delta_contrast(
+  fit1 = fit_shift,
+  fit0 = fit_identity,
+  transform = "difference"
+)
+
+comparison <- data.frame(
+  parameter = c("E[Y]", "E[Y^d]", "E[Y^d] - E[Y]"),
+  truth = c(
+    truth["EY"],
+    truth["EYd"],
+    truth["diff"]
+  ),
+  estimate = c(
+    fit_identity$estimate,
+    fit_shift$estimate,
+    fit_diff$estimate
+  ),
+  se = c(
+    fit_identity$se,
+    fit_shift$se,
+    fit_diff$se
+  )
+)
+
+comparison$error <- comparison$estimate - comparison$truth
+
+comparison
+fit_diff
+```
+
+## Monte Carlo distribution of the estimators
+
+To visualize the sampling distribution of the estimators, we now repeat the
+entire estimation procedure over many independently generated datasets. This
+lets us plot the empirical distribution of the estimated parameters and compare
+it to the Monte Carlo truth.
+
+For vignette speed, we keep the number of repetitions moderate. If you run this
+interactively, you may wish to increase `B`.
+
+```{r}
+fit_lmtp_once <- function(n,
+                          tau = 12,
+                          delta = 1) {
+
+  df <- generate_lmtp_data(
+    n = n,
+    tau = tau,
+    delta = NULL
+  )
+
+  A_cols <- paste0("A", seq_len(tau))
+  L_cols <- as.list(paste0("L", seq_len(tau)))
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = A_cols,
+    L_cols = L_cols,
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  policy_shift <- repeat_policy_over_time(
+    mtp_additive_shift(delta = delta),
+    tau = ds$tau()
+  )
+
+  policy_identity <- identity_policy(
+    A_type = "continuous",
+    tau = ds$tau()
+  )
+
+  m_learners <- make_glm_m_learners(
+    tau = ds$tau(),
+    family = stats::gaussian()
+  )
+
+  g_learners <- make_nadir_density_g_learners(
+    tau = ds$tau(),
+    learner = nadir::lnr_glm_density
+  )
+
+  nf_shift <- LMTPNuisanceFactory$new(
+    policy_seq = policy_shift,
+    m_learners = m_learners,
+    g_learners = g_learners,
+    truncate_density = 1e-12,
+    truncate_ratio = c(1e-6, Inf)
+  )
+
+  nf_identity <- LMTPNuisanceFactory$new(
+    policy_seq = policy_identity,
+    m_learners = m_learners,
+    g_learners = g_learners,
+    truncate_density = 1e-12,
+    truncate_ratio = c(1e-6, Inf)
+  )
+
+  fluctuation <- LMTPFluctuationSubmodel$new(
+    family = stats::gaussian(),
+    use_intercept = TRUE
+  )
+
+  fit_shift <- run_tmle_for_LMTP(
+    ds = ds,
+    nuisance_factory = nf_shift,
+    fluctuation = fluctuation
+  )
+
+  fit_identity <- run_tmle_for_LMTP(
+    ds = ds,
+    nuisance_factory = nf_identity,
+    fluctuation = fluctuation
+  )
+
+  fit_diff <- lmtp_delta_contrast(
+    fit1 = fit_shift,
+    fit0 = fit_identity,
+    transform = "difference"
+  )
+
+  c(
+    "E[Y]" = fit_identity$estimate,
+    "E[Y^d]" = fit_shift$estimate,
+    "E[Y^d] - E[Y]" = fit_diff$estimate
+  )
+}
+```
+
+```{r}
+set.seed(1234)
+
+B <- 50
+
+mc_estimates <- replicate(
+  B,
+  fit_lmtp_once(
+    n = n,
+    tau = tau,
+    delta = delta
+  )
+)
+
+mc_df <- data.frame(
+  replicate = rep(seq_len(B), each = nrow(mc_estimates)),
+  parameter = factor(
+    rep(rownames(mc_estimates), times = ncol(mc_estimates)),
+    levels = rownames(mc_estimates)
+  ),
+  estimate = as.vector(mc_estimates)
+)
+
+truth_df <- data.frame(
+  parameter = factor(
+    c("E[Y]", "E[Y^d]", "E[Y^d] - E[Y]"),
+    levels = levels(mc_df$parameter)
+  ),
+  truth = c(
+    truth["EY"],
+    truth["EYd"],
+    truth["diff"]
+  )
+)
+
+head(mc_df)
+truth_df
+```
+
+```{r}
+ggplot(mc_df, aes(x = parameter, y = estimate)) +
+  geom_jitter(
+    width = 0.12,
+    height = 0,
+    alpha = 0.35,
+    size = 1.6,
+    color = "gray35"
+  ) +
+  geom_boxplot(
+    width = 0.45,
+    alpha = 0.35,
+    outlier.shape = NA,
+    fill = "skyblue3",
+    color = "gray15"
+  ) +
+  geom_point(
+    data = truth_df,
+    aes(x = parameter, y = truth),
+    inherit.aes = FALSE,
+    shape = 17,
+    size = 4.8,
+    color = "#D55E00"
+  ) +
+  labs(
+    x = NULL,
+    y = "Estimate",
+    title = "Sampling distribution of LMTP estimates across simulated datasets",
+    subtitle = "Triangles indicate Monte Carlo truth"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# Remarks
+
+This example is deliberately favorable to the estimator. The nuisance models
+are correctly specified, the policy is a simple additive shift, and the
+treatment densities are smooth and continuous. In more realistic applications,
+one would usually replace the GLM learners with richer learners and use
+cross-fitting.
+
+For example, one could wrap the same per-time learners with
+`crossfit_lmtp_learner()` before passing them to the nuisance factory. This is
+often preferable when using flexible machine-learning nuisance estimators.
+
+```{r, eval = FALSE}
+m_learners_cf <- lapply(
+  m_learners,
+  crossfit_lmtp_learner,
+  V = 5
+)
+
+g_learners_cf <- lapply(
+  g_learners,
+  crossfit_lmtp_learner,
+  V = 5
+)
+
+nf_shift_cf <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners_cf,
+  g_learners = g_learners_cf,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, Inf)
+)
+
+fit_shift_cf <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift_cf,
+  fluctuation = fluctuation
+)
+```

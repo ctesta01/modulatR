@@ -1,0 +1,648 @@
+---
+title: "Estimating longitudinal ATEs for a binary treatment"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Estimating longitudinal ATEs for a binary treatment}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+set.seed(2026)
+
+library(modulatR)
+library(ggplot2)
+```
+
+# Overview
+
+This vignette shows how to use `{modulatR}` to estimate a longitudinal average
+treatment effect for a binary treatment.
+
+The observed data have the longitudinal structure
+
+\[
+  O =
+  (W, L_1, A_1, L_2, A_2, \ldots, L_\tau, A_\tau, Y),
+\]
+
+where \(W\) is a baseline covariate, \(L_t\) is a time-varying covariate,
+\(A_t \in \{0,1\}\) is a binary treatment, and \(Y\) is a final continuous
+outcome.
+
+The estimand is the static-regime contrast
+
+\[
+  \psi =
+  \mathbb{E}\{Y^{\bar A = 1}\}
+  -
+  \mathbb{E}\{Y^{\bar A = 0}\}.
+\]
+
+Although `{modulatR}` is organized around modified treatment policies, a static
+binary treatment regime is a valid discrete policy. For example,
+
+\[
+  d_t(A_t, H_t) = 1
+\]
+
+is the policy that sets treatment to one at time \(t\), regardless of the
+observed treatment or history.
+
+# Data-generating process
+
+We simulate a longitudinal dataset with binary treatments. Treatment at each
+time depends on the current covariate history, and later covariates depend on
+earlier treatment.
+
+```{r}
+# -------------------------------------------------------------------------
+# Data generator
+# -------------------------------------------------------------------------
+
+generate_binary_lmtp_data <- function(n,
+                                      tau = 6,
+                                      static_a = NULL,
+                                      seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+
+  W <- rnorm(n)
+
+  L <- matrix(NA_real_, nrow = n, ncol = tau)
+  A <- matrix(NA_integer_, nrow = n, ncol = tau)
+
+  colnames(L) <- paste0("L", seq_len(tau))
+  colnames(A) <- paste0("A", seq_len(tau))
+
+  prev_L <- rep(0, n)
+  prev_A <- rep(0, n)
+
+  for (t in seq_len(tau)) {
+    L[, t] <-
+      0.35 * W +
+      0.40 * prev_L +
+      0.70 * prev_A +
+      rnorm(n)
+
+    p_A_t <- plogis(
+      -0.15 +
+        0.35 * W +
+        0.65 * L[, t] -
+        0.25 * prev_A
+    )
+
+    if (is.null(static_a)) {
+      A[, t] <- rbinom(n, size = 1, prob = p_A_t)
+    } else {
+      A[, t] <- static_a
+    }
+
+    prev_L <- L[, t]
+    prev_A <- A[, t]
+  }
+
+  beta_L <- 0.15 + 0.05 * exp(-0.20 * (seq_len(tau) - 1))
+  beta_A <- 0.50 + 0.35 * exp(-0.20 * (seq_len(tau) - 1))
+
+  Y <-
+    1 +
+    0.40 * W +
+    as.numeric(L %*% beta_L) +
+    as.numeric(A %*% beta_A) +
+    rnorm(n)
+
+  data.frame(
+    W = W,
+    as.data.frame(L),
+    as.data.frame(A),
+    Y = Y,
+    check.names = FALSE
+  )
+}
+```
+
+# Monte Carlo truth
+
+Because the data-generating process is known, we approximate the truth using a
+large Monte Carlo sample. We simulate under the always-treated regime and under
+the never-treated regime.
+
+```{r}
+# -------------------------------------------------------------------------
+# Truth by large Monte Carlo sample
+# -------------------------------------------------------------------------
+
+set.seed(1)
+
+tau <- 6
+n_truth <- 2e5
+
+truth_one <- generate_binary_lmtp_data(
+  n = n_truth,
+  tau = tau,
+  static_a = 1
+)
+
+truth_zero <- generate_binary_lmtp_data(
+  n = n_truth,
+  tau = tau,
+  static_a = 0
+)
+
+truth <- c(
+  EY1 = mean(truth_one$Y),
+  EY0 = mean(truth_zero$Y),
+  ATE = mean(truth_one$Y) - mean(truth_zero$Y)
+)
+
+truth
+```
+
+# Observed data
+
+We now generate one observed dataset under the natural treatment process.
+
+```{r}
+# -------------------------------------------------------------------------
+# Observed data
+# -------------------------------------------------------------------------
+
+set.seed(2)
+
+n <- 8000
+
+df <- generate_binary_lmtp_data(
+  n = n,
+  tau = tau,
+  static_a = NULL
+)
+
+A_cols <- paste0("A", seq_len(tau))
+L_cols <- as.list(paste0("L", seq_len(tau)))
+
+ds <- LMTPData$new(
+  data = df,
+  A_cols = A_cols,
+  L_cols = L_cols,
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+```
+
+It is useful to check the treatment prevalence by time.
+
+```{r}
+treatment_prevalence <- data.frame(
+  time = seq_len(tau),
+  treatment = A_cols,
+  prevalence = vapply(df[A_cols], mean, numeric(1))
+)
+
+treatment_prevalence
+```
+
+# Static binary treatment policies
+
+The always-treated policy maps every observed treatment value to one. The
+never-treated policy maps every observed treatment value to zero.
+
+```{r}
+# -------------------------------------------------------------------------
+# Static binary policies
+# -------------------------------------------------------------------------
+
+mtp_always_treat <- mtp_discrete(
+  map_fun = function(A, H_df) rep(1, length(A)),
+  support = c(0, 1),
+  name = "always_treat"
+)
+
+mtp_never_treat <- mtp_discrete(
+  map_fun = function(A, H_df) rep(0, length(A)),
+  support = c(0, 1),
+  name = "never_treat"
+)
+
+policy_always_treat <- repeat_policy_over_time(
+  mtp_always_treat,
+  tau = ds$tau(),
+  name = "always_treat_sequence"
+)
+
+policy_never_treat <- repeat_policy_over_time(
+  mtp_never_treat,
+  tau = ds$tau(),
+  name = "never_treat_sequence"
+)
+
+policy_always_treat
+policy_never_treat
+```
+
+We can inspect the policies on the observed data.
+
+```{r}
+policy_check_one <- policy_always_treat$apply_to_data(ds)
+policy_check_zero <- policy_never_treat$apply_to_data(ds)
+
+head(policy_check_one[, c(ds$id_col, "A1", "A1_star", "A6", "A6_star")])
+head(policy_check_zero[, c(ds$id_col, "A1", "A1_star", "A6", "A6_star")])
+```
+
+# Learners
+
+For the outcome regressions, we use correctly specified Gaussian GLMs. For the
+treatment mechanism ratios, we use the ratio-classification approach through
+`lambda_learners`.
+
+The `lambda_learners` estimate a classification nuisance in an augmented dataset
+that distinguishes observed rows from intervention-shifted rows. The nuisance
+factory then converts this classification regression into density or mass
+ratios.
+
+```{r}
+# -------------------------------------------------------------------------
+# Learners
+# -------------------------------------------------------------------------
+
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian()
+)
+
+lambda_learners <- make_glm_lambda_learners(
+  tau = ds$tau(),
+  family = stats::binomial()
+)
+```
+
+# Nuisance factories
+
+We need one nuisance factory for each policy because the policy sequence is part
+of the nuisance factory.
+
+```{r}
+# -------------------------------------------------------------------------
+# Nuisance factories
+# -------------------------------------------------------------------------
+
+nf_always_treat <- LMTPNuisanceFactory$new(
+  policy_seq = policy_always_treat,
+  m_learners = m_learners,
+  lambda_learners = lambda_learners,
+  clip_lambda_probability = 1e-6,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+nf_never_treat <- LMTPNuisanceFactory$new(
+  policy_seq = policy_never_treat,
+  m_learners = m_learners,
+  lambda_learners = lambda_learners,
+  clip_lambda_probability = 1e-6,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+```
+
+# Fit the longitudinal TMLEs
+
+We estimate
+
+\[
+  \mathbb{E}\{Y^{\bar A = 1}\}
+\]
+
+and
+
+\[
+  \mathbb{E}\{Y^{\bar A = 0}\}.
+\]
+
+```{r}
+# -------------------------------------------------------------------------
+# Fit TMLEs
+# -------------------------------------------------------------------------
+
+fit_always_treat <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_always_treat,
+  fluctuation = fluctuation
+)
+
+fit_never_treat <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nf_never_treat,
+  fluctuation = fluctuation
+)
+
+fit_always_treat
+fit_never_treat
+```
+
+# Longitudinal ATE contrast
+
+The longitudinal average treatment effect is the difference between the
+always-treated and never-treated counterfactual means.
+
+```{r}
+# -------------------------------------------------------------------------
+# Difference contrast
+# -------------------------------------------------------------------------
+
+fit_ate <- lmtp_delta_contrast(
+  fit1 = fit_always_treat,
+  fit0 = fit_never_treat,
+  transform = "difference"
+)
+
+comparison <- data.frame(
+  parameter = c(
+    "E[Y^{Abar = 1}]",
+    "E[Y^{Abar = 0}]",
+    "ATE"
+  ),
+  truth = c(
+    truth["EY1"],
+    truth["EY0"],
+    truth["ATE"]
+  ),
+  estimate = c(
+    fit_always_treat$estimate,
+    fit_never_treat$estimate,
+    fit_ate$estimate
+  ),
+  se = c(
+    fit_always_treat$se,
+    fit_never_treat$se,
+    fit_ate$se
+  )
+)
+
+comparison$lower <- comparison$estimate - qnorm(0.975) * comparison$se
+comparison$upper <- comparison$estimate + qnorm(0.975) * comparison$se
+comparison$error <- comparison$estimate - comparison$truth
+
+comparison
+fit_ate
+```
+
+# Visual check
+
+```{r}
+ggplot(comparison, aes(x = parameter, y = estimate)) +
+  geom_errorbar(
+    aes(ymin = lower, ymax = upper),
+    width = 0.12
+  ) +
+  geom_point(size = 2.5) +
+  geom_point(
+    aes(y = truth),
+    shape = 17,
+    size = 4.5,
+    color = "#D55E00"
+  ) +
+  labs(
+    x = NULL,
+    y = "Value",
+    title = "Longitudinal static-regime estimates",
+    subtitle = "Triangles indicate Monte Carlo truth"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# Diagnostics for the ratio-classification nuisances
+
+The weights can become unstable when treatment positivity is weak. For a simple
+diagnostic, we inspect the cumulative ratio process \(\omega_t\) under each
+policy.
+
+```{r}
+# -------------------------------------------------------------------------
+# Ratio diagnostics
+# -------------------------------------------------------------------------
+
+omega_summary <- function(nf, label) {
+  data.frame(
+    policy = label,
+    time = seq_len(nf$tau),
+    min = vapply(nf$omega_preds, min, numeric(1)),
+    q25 = vapply(nf$omega_preds, quantile, numeric(1), probs = 0.25),
+    median = vapply(nf$omega_preds, median, numeric(1)),
+    mean = vapply(nf$omega_preds, mean, numeric(1)),
+    q75 = vapply(nf$omega_preds, quantile, numeric(1), probs = 0.75),
+    max = vapply(nf$omega_preds, max, numeric(1))
+  )
+}
+
+omega_diagnostics <- rbind(
+  omega_summary(nf_always_treat, "always_treat"),
+  omega_summary(nf_never_treat, "never_treat")
+)
+
+omega_diagnostics
+```
+
+```{r}
+ggplot(omega_diagnostics, aes(x = time, y = mean, group = policy)) +
+  geom_line() +
+  geom_point() +
+  labs(
+    x = "Time",
+    y = "Mean cumulative ratio",
+    title = "Simple cumulative ratio diagnostic"
+  ) +
+  theme_minimal(base_size = 12)
+```
+
+# Monte Carlo distribution of the estimators
+
+As an optional check, we can repeat the analysis over several independently
+generated observed datasets. This gives a rough empirical sampling distribution
+for the estimated static-regime means and the ATE.
+
+For a package vignette, keep `B` small. For a simulation study, increase it.
+
+```{r}
+fit_binary_lmtp_once <- function(n,
+                                 tau = 6) {
+  df <- generate_binary_lmtp_data(
+    n = n,
+    tau = tau,
+    static_a = NULL
+  )
+
+  A_cols <- paste0("A", seq_len(tau))
+  L_cols <- as.list(paste0("L", seq_len(tau)))
+
+  ds <- LMTPData$new(
+    data = df,
+    A_cols = A_cols,
+    L_cols = L_cols,
+    W_cols = "W",
+    Y_col = "Y"
+  )
+
+  mtp_always_treat <- mtp_discrete(
+    map_fun = function(A, H_df) rep(1, length(A)),
+    support = c(0, 1),
+    name = "always_treat"
+  )
+
+  mtp_never_treat <- mtp_discrete(
+    map_fun = function(A, H_df) rep(0, length(A)),
+    support = c(0, 1),
+    name = "never_treat"
+  )
+
+  policy_always_treat <- repeat_policy_over_time(
+    mtp_always_treat,
+    tau = ds$tau(),
+    name = "always_treat_sequence"
+  )
+
+  policy_never_treat <- repeat_policy_over_time(
+    mtp_never_treat,
+    tau = ds$tau(),
+    name = "never_treat_sequence"
+  )
+
+  m_learners <- make_glm_m_learners(
+    tau = ds$tau(),
+    family = stats::gaussian()
+  )
+
+  lambda_learners <- make_glm_lambda_learners(
+    tau = ds$tau(),
+    family = stats::binomial()
+  )
+
+  nf_always_treat <- LMTPNuisanceFactory$new(
+    policy_seq = policy_always_treat,
+    m_learners = m_learners,
+    lambda_learners = lambda_learners,
+    clip_lambda_probability = 1e-6,
+    truncate_ratio = c(1e-6, 1e6)
+  )
+
+  nf_never_treat <- LMTPNuisanceFactory$new(
+    policy_seq = policy_never_treat,
+    m_learners = m_learners,
+    lambda_learners = lambda_learners,
+    clip_lambda_probability = 1e-6,
+    truncate_ratio = c(1e-6, 1e6)
+  )
+
+  fluctuation <- LMTPFluctuationSubmodel$new(
+    family = stats::gaussian(),
+    use_intercept = TRUE
+  )
+
+  fit_always_treat <- run_tmle_for_LMTP(
+    ds = ds,
+    nuisance_factory = nf_always_treat,
+    fluctuation = fluctuation
+  )
+
+  fit_never_treat <- run_tmle_for_LMTP(
+    ds = ds,
+    nuisance_factory = nf_never_treat,
+    fluctuation = fluctuation
+  )
+
+  fit_ate <- lmtp_delta_contrast(
+    fit1 = fit_always_treat,
+    fit0 = fit_never_treat,
+    transform = "difference"
+  )
+
+  c(
+    "E[Y^{Abar = 1}]" = fit_always_treat$estimate,
+    "E[Y^{Abar = 0}]" = fit_never_treat$estimate,
+    "ATE" = fit_ate$estimate
+  )
+}
+```
+
+```{r}
+set.seed(1234)
+
+B <- 30
+
+mc_estimates <- replicate(
+  B,
+  fit_binary_lmtp_once(
+    n = n,
+    tau = tau
+  )
+)
+
+mc_df <- data.frame(
+  replicate = rep(seq_len(B), each = nrow(mc_estimates)),
+  parameter = factor(
+    rep(rownames(mc_estimates), times = ncol(mc_estimates)),
+    levels = rownames(mc_estimates)
+  ),
+  estimate = as.vector(mc_estimates)
+)
+
+truth_df <- data.frame(
+  parameter = factor(
+    c("E[Y^{Abar = 1}]", "E[Y^{Abar = 0}]", "ATE"),
+    levels = levels(mc_df$parameter)
+  ),
+  truth = c(
+    truth["EY1"],
+    truth["EY0"],
+    truth["ATE"]
+  )
+)
+
+head(mc_df)
+truth_df
+```
+
+```{r}
+ggplot(mc_df, aes(x = parameter, y = estimate)) +
+  geom_jitter(
+    width = 0.12,
+    height = 0,
+    alpha = 0.35,
+    size = 1.6,
+    color = "gray35"
+  ) +
+  geom_boxplot(
+    width = 0.45,
+    alpha = 0.35,
+    outlier.shape = NA,
+    fill = "skyblue3",
+    color = "gray15"
+  ) +
+  geom_point(
+    data = truth_df,
+    aes(x = parameter, y = truth),
+    inherit.aes = FALSE,
+    shape = 17,
+    size = 4.8,
+    color = "#D55E00"
+  ) +
+  labs(
+    x = NULL,
+    y = "Estimate",
+    title = "Sampling distribution of longitudinal binary-treatment estimates",
+    subtitle = "Triangles indicate Monte Carlo truth"
+  ) +
+  theme_minimal(base_size = 12)
+```

@@ -26,7 +26,7 @@ This vignette illustrates the simultaneous subgroup TMLE implemented in
 `run_subgroup_tmle_for_LMTP()`.
 
 The target parameters are subgroup-specific LMTP means,
-$$\psi_j = \mathbb E\{Y(\bar A^d) \mid V \in \mathcal A_j\},
+$$\psi_j = \mathbb E\{Y(\bar A^d) \mid V \in A_j\},
 \quad j = 1,\ldots,J.$$
 
 The function targets all subgroup parameters simultaneously using a vector-valued

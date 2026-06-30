@@ -1,0 +1,614 @@
+---
+title: "DR-Learner for conditional LMTP effects"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{DR-Learner for conditional LMTP effects}
+  %\VignetteEngine{knitr::rmarkdown}
+  \usepackage[utf8]{inputenc}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5
+)
+
+set.seed(2026)
+
+library(modulatR)
+library(nadir)
+library(ggplot2)
+```
+
+# DR-Learner for conditional LMTP effects
+
+The subgroup TMLE estimates a finite vector of subgroup-specific LMTP parameters. That is useful when the scientific question is about a small number of pre-specified groups.
+
+The DR-learner approach targets a different object: a conditional LMTP function. Here we estimate
+
+\[
+\tau(v)
+=
+\mathbb E\{Y(\bar A^d) - Y \mid W = v\}.
+\]
+
+This is useful when the conditioning variable is continuous and we want to recover a smooth effect curve.
+
+# Truth by large Monte Carlo sample
+
+We generate a longitudinal data structure with two time points. The modified treatment policy shifts both treatments upward by one unit:
+
+\[
+A_t^d = A_t + 1.
+\]
+
+The outcome model is constructed so that the effect of this shift varies smoothly with baseline \(W\).
+
+```{r}
+# Truth by large Monte Carlo sample ----------------------------------------
+
+set.seed(1)
+
+n_truth <- 5e5
+
+W   <- rnorm(n_truth)
+eL1 <- rnorm(n_truth)
+eA1 <- rnorm(n_truth)
+eL2 <- rnorm(n_truth)
+eA2 <- rnorm(n_truth)
+eY  <- rnorm(n_truth)
+
+L1 <- 0.5 * W + eL1
+
+A1 <- 0.5 * W +
+  0.7 * L1 +
+  0.2 * W^2 +
+  eA1
+
+L2 <- 0.4 * W +
+  0.6 * L1 +
+  0.6 * A1 +
+  eL2
+
+A2 <- 0.3 * W +
+  0.6 * L2 +
+  0.15 * W^2 +
+  eA2
+
+# The treatment coefficients vary with W. This makes the conditional
+# LMTP contrast a smooth nonlinear function of W.
+beta_A1 <- 0.6 + 0.4 * W + 0.25 * W^2
+beta_A2 <- 0.5 - 0.25 * W + 0.15 * W^2
+
+Y <- 1 +
+  0.5 * W +
+  0.3 * L1 +
+  0.25 * L2 +
+  beta_A1 * A1 +
+  beta_A2 * A2 +
+  eY
+
+# Counterfactual world under additive shift.
+A1d <- A1 + 1
+
+L2d <- 0.4 * W +
+  0.6 * L1 +
+  0.6 * A1d +
+  eL2
+
+A2d <- 0.3 * W +
+  0.6 * L2d +
+  0.15 * W^2 +
+  eA2 +
+  1
+
+Yd <- 1 +
+  0.5 * W +
+  0.3 * L1 +
+  0.25 * L2d +
+  beta_A1 * A1d +
+  beta_A2 * A2d +
+  eY
+
+truth_df <- data.frame(
+  W = W,
+  Y = Y,
+  Yd = Yd,
+  diff = Yd - Y
+)
+
+# Approximate the true conditional effect curve by binning W finely.
+truth_curve <- truth_df |>
+  transform(W_bin = cut(W, breaks = seq(-2.5, 2.5, length.out = 81))) |>
+  subset(!is.na(W_bin)) |>
+  aggregate(diff ~ W_bin, data = _, FUN = mean)
+
+truth_curve$W_mid <- sapply(
+  strsplit(gsub("\\(|\\]|\\[|\\)", "", as.character(truth_curve$W_bin)), ","),
+  function(x) mean(as.numeric(x))
+)
+
+truth_curve <- truth_curve[, c("W_mid", "diff")]
+names(truth_curve) <- c("W", "truth")
+
+head(truth_curve)
+```
+
+# Observed data
+
+```{r}
+# Observed data ------------------------------------------------------------
+
+set.seed(2)
+
+n <- 5000
+
+W  <- rnorm(n)
+L1 <- 0.5 * W + rnorm(n)
+
+A1 <- 0.5 * W +
+  0.7 * L1 +
+  0.2 * W^2 +
+  rnorm(n)
+
+L2 <- 0.4 * W +
+  0.6 * L1 +
+  0.6 * A1 +
+  rnorm(n)
+
+A2 <- 0.3 * W +
+  0.6 * L2 +
+  0.15 * W^2 +
+  rnorm(n)
+
+beta_A1 <- 0.6 + 0.4 * W + 0.25 * W^2
+beta_A2 <- 0.5 - 0.25 * W + 0.15 * W^2
+
+Y <- 1 +
+  0.5 * W +
+  0.3 * L1 +
+  0.25 * L2 +
+  beta_A1 * A1 +
+  beta_A2 * A2 +
+  rnorm(n)
+
+df <- data.frame(W, L1, A1, L2, A2, Y)
+
+ds <- LMTPData$new(
+  data = df,
+  A_cols = c("A1", "A2"),
+  L_cols = list("L1", "L2"),
+  W_cols = "W",
+  Y_col = "Y"
+)
+
+ds
+```
+
+# Define the LMTP
+
+```{r}
+# Policy ------------------------------------------------------------------
+
+policy_shift <- repeat_policy_over_time(
+  mtp_additive_shift(delta = 1),
+  tau = ds$tau()
+)
+
+policy_shift
+```
+
+# Specify nuisance learners
+
+For the first-stage nuisance functions, we use flexible outcome regressions and density learners. In a serious analysis, one would usually cross-fit these nuisance learners. This vignette keeps the computation modest.
+
+```{r}
+# Nuisance learners --------------------------------------------------------
+
+m_formula_t1 <- `..pseudo_outcome` ~ W + I(W^2) + L1 + I(L1^2) + A1 + I(A1^2) + W:A1
+m_formula_t2 <- `..pseudo_outcome` ~ W + I(W^2) + L1 + I(L1^2) + A1 +
+  L2 + I(L2^2) + A2 + I(A2^2) + W:A2 + L2:A2
+
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian(),
+  formula = list(m_formula_t1, m_formula_t2)
+)
+
+g_learners <- make_nadir_density_g_learners(
+  tau = ds$tau(),
+  learner = nadir::lnr_glm_density
+)
+
+nf_shift <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian(),
+  use_intercept = TRUE
+)
+```
+
+# Fit the DR-learner
+
+The meta-learner regresses the DR pseudo-outcome contrast on \(W\). We use a flexible learner because the true curve is nonlinear.
+
+```{r}
+# DR-learner ---------------------------------------------------------------
+
+dr_fit <- run_drlearner_for_subgroup_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift,
+  fluctuation = fluctuation,
+  metalearner = make_nadir_metalearner(
+    learner = nadir::lnr_hal,
+    smoothness_orders = 1
+  ),
+  conditioning_cols = "W",
+  A_type = "continuous"
+)
+
+dr_fit
+```
+
+# Predict the conditional LMTP contrast
+
+```{r}
+# Prediction grid ----------------------------------------------------------
+
+grid <- data.frame(
+  W = seq(-2.5, 2.5, length.out = 200)
+)
+
+grid$estimated_contrast <- predict.LMTPDRLearner(
+  dr_fit,
+  newdata = grid,
+  type = "contrast"
+)
+
+head(grid)
+```
+
+# Compare the estimated curve to truth
+
+```{r}
+# Plot estimated curve against Monte Carlo truth ---------------------------
+
+ggplot() +
+  geom_point(
+    data = truth_curve,
+    aes(x = W, y = truth),
+    alpha = 0.35
+  ) +
+  geom_line(
+    data = grid,
+    aes(x = W, y = estimated_contrast),
+    linewidth = 1
+  ) +
+  labs(
+    x = "Baseline W",
+    y = "Conditional LMTP contrast",
+    title = "DR-learner estimate of a smooth conditional LMTP effect",
+    subtitle = "Points: large-sample Monte Carlo truth; line: estimated DR-learner curve"
+  )
+```
+
+# Optional: compare to a simple linear meta-learner
+
+A linear meta-learner is misspecified for this DGP. This comparison is meant to show why the meta-learner matters.
+
+```{r}
+# Linear meta-learner comparison ------------------------------------------
+
+dr_fit_lm <- run_drlearner_for_subgroup_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift,
+  fluctuation = fluctuation,
+  metalearner = make_lm_metalearner(),
+  conditioning_cols = "W",
+  A_type = "continuous"
+)
+
+grid$linear_meta_contrast <- predict.LMTPDRLearner(
+  dr_fit_lm,
+  newdata = grid,
+  type = "contrast"
+)
+
+ggplot() +
+  geom_point(
+    data = truth_curve,
+    aes(x = W, y = truth),
+    alpha = 0.35
+  ) +
+  geom_line(
+    data = grid,
+    aes(x = W, y = estimated_contrast),
+    linewidth = 1
+  ) +
+  geom_line(
+    data = grid,
+    aes(x = W, y = linear_meta_contrast),
+    linewidth = 1,
+    linetype = "dashed"
+  ) +
+  labs(
+    x = "Baseline W",
+    y = "Conditional LMTP contrast",
+    title = "Flexible versus linear meta-learning",
+    subtitle = "Solid: flexible meta-learner; dashed: linear meta-learner; points: Monte Carlo truth"
+  )
+```
+
+
+
+# Other Approaches
+
+```{r}
+# Smooth meta-learners -----------------------------------------------------
+
+# The DR-learner estimates the conditional contrast by regressing the
+# DR pseudo-outcome contrast on W. Since this DGP was designed to have a
+# smooth nonlinear relationship in W, we compare several smooth meta-learners:
+#
+#   1. linear lm:       contrast ~ W
+#   2. quadratic lm:    contrast ~ W + W^2
+#   3. spline lm:       contrast ~ ns(W, df = 5)
+#   4. loess:           local polynomial smoothing
+#
+# The quadratic lm should do especially well here because the true curve has
+# a quadratic component.
+
+library(splines)
+
+# Linear meta-learner.
+metalearner_linear <- make_lm_metalearner(
+  formula = `..dr_pseudooutcome` ~ W
+)
+
+# Quadratic meta-learner.
+metalearner_quadratic <- make_lm_metalearner(
+  formula = `..dr_pseudooutcome` ~ W + I(W^2)
+)
+
+# Natural spline meta-learner.
+metalearner_spline <- make_lm_metalearner(
+  formula = `..dr_pseudooutcome` ~ splines::ns(W, df = 5)
+)
+```
+
+```{r}
+# Loess meta-learner -------------------------------------------------------
+
+make_loess_metalearner <- function(formula = NULL,
+                                   span = 0.75,
+                                   degree = 2,
+                                   ...) {
+  loess_args <- list(...)
+
+  function(data, outcome_col, covariate_cols) {
+    if (length(covariate_cols) != 1L) {
+      stop("`make_loess_metalearner()` currently expects exactly one conditioning covariate.")
+    }
+
+    if (is.null(formula)) {
+      formula <- stats::as.formula(
+        paste(outcome_col, "~", covariate_cols[[1]])
+      )
+    }
+
+    fit <- do.call(
+      stats::loess,
+      c(
+        list(
+          formula = formula,
+          data = data,
+          span = span,
+          degree = degree,
+          control = stats::loess.control(surface = "direct")
+        ),
+        loess_args
+      )
+    )
+
+    list(
+      fit = fit,
+      predict = function(newdata) {
+        as.numeric(stats::predict(fit, newdata = newdata))
+      }
+    )
+  }
+}
+
+metalearner_loess <- make_loess_metalearner(
+  formula = `..dr_pseudooutcome` ~ W,
+  span = 0.65,
+  degree = 2
+)
+```
+
+
+```{r}
+# Fit DR-learners with smooth meta-learners --------------------------------
+
+dr_fit_linear <- run_drlearner_for_subgroup_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift,
+  fluctuation = fluctuation,
+  metalearner = metalearner_linear,
+  conditioning_cols = "W",
+  A_type = "continuous"
+)
+
+# Recreate the nuisance factory before each fit if your factory stores fitted
+# vectors internally. This avoids accidentally reusing mutated state.
+nf_shift_quad <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+dr_fit_quadratic <- run_drlearner_for_subgroup_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift_quad,
+  fluctuation = fluctuation,
+  metalearner = metalearner_quadratic,
+  conditioning_cols = "W",
+  A_type = "continuous"
+)
+
+nf_shift_spline <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+dr_fit_spline <- run_drlearner_for_subgroup_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift_spline,
+  fluctuation = fluctuation,
+  metalearner = metalearner_spline,
+  conditioning_cols = "W",
+  A_type = "continuous"
+)
+
+nf_shift_loess <- LMTPNuisanceFactory$new(
+  policy_seq = policy_shift,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(1e-6, 1e6)
+)
+
+dr_fit_loess <- run_drlearner_for_subgroup_LMTP(
+  ds = ds,
+  nuisance_factory = nf_shift_loess,
+  fluctuation = fluctuation,
+  metalearner = metalearner_loess,
+  conditioning_cols = "W",
+  A_type = "continuous"
+)
+```
+
+```{r}
+# Predict conditional contrast curves --------------------------------------
+
+grid <- data.frame(
+  W = seq(-2.5, 2.5, length.out = 200)
+)
+
+grid$linear <- predict.LMTPDRLearner(
+  dr_fit_linear,
+  newdata = grid,
+  type = "contrast"
+)
+
+grid$quadratic <- predict.LMTPDRLearner(
+  dr_fit_quadratic,
+  newdata = grid,
+  type = "contrast"
+)
+
+grid$spline <- predict.LMTPDRLearner(
+  dr_fit_spline,
+  newdata = grid,
+  type = "contrast"
+)
+
+grid$loess <- predict.LMTPDRLearner(
+  dr_fit_loess,
+  newdata = grid,
+  type = "contrast"
+)
+
+plot_df <- rbind(
+  data.frame(W = grid$W, estimate = grid$linear, method = "Linear lm"),
+  data.frame(W = grid$W, estimate = grid$quadratic, method = "Quadratic lm"),
+  data.frame(W = grid$W, estimate = grid$spline, method = "Natural spline"),
+  data.frame(W = grid$W, estimate = grid$loess, method = "Loess")
+)
+
+ggplot() +
+  geom_point(
+    data = truth_curve,
+    aes(x = W, y = truth),
+    alpha = 0.80
+  ) +
+  geom_line(
+    data = plot_df,
+    aes(x = W, y = estimate, linetype = method, color = method),
+    linewidth = 2
+  ) +
+  geom_rug(
+    data = df,
+    aes(x = W),
+    alpha = .3) + 
+  see::scale_color_okabeito() + 
+  theme_minimal() + 
+  labs(
+    x = "Baseline W",
+    y = "Conditional LMTP contrast",
+    title = "DR-learner estimates with smooth meta-learners",
+    subtitle = "Points: Monte Carlo truth; lines: second-stage DR-learner fits"
+  )
+```
+
+
+```{r}
+# Compare methods by RMSE against binned truth -----------------------------
+
+truth_eval <- truth_curve
+pred_eval <- data.frame(
+  W = truth_eval$W
+)
+
+pred_eval$linear <- predict(
+  dr_fit_linear,
+  newdata = pred_eval,
+  type = "contrast"
+)
+
+pred_eval$quadratic <- predict(
+  dr_fit_quadratic,
+  newdata = pred_eval,
+  type = "contrast"
+)
+
+pred_eval$spline <- predict(
+  dr_fit_spline,
+  newdata = pred_eval,
+  type = "contrast"
+)
+
+pred_eval$loess <- predict(
+  dr_fit_loess,
+  newdata = pred_eval,
+  type = "contrast"
+)
+
+rmse <- data.frame(
+  method = c("Linear lm", "Quadratic lm", "Natural spline", "Loess"),
+  rmse = c(
+    sqrt(mean((pred_eval$linear - truth_eval$truth)^2)),
+    sqrt(mean((pred_eval$quadratic - truth_eval$truth)^2)),
+    sqrt(mean((pred_eval$spline - truth_eval$truth)^2)),
+    sqrt(mean((pred_eval$loess - truth_eval$truth)^2))
+  )
+)
+
+rmse[order(rmse$rmse), ]
+```
+
+
+

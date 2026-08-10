@@ -1,7 +1,6 @@
 .Rproj.user
 **.Rcheck
 inst/doc
-docs
 man/**
 man/*
 inst/simstudy1

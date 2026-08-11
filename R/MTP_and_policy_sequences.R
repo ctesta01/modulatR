@@ -608,49 +608,232 @@ LMTPPolicySequence <- R6::R6Class(
 
 
 
-
 # helpers for MTPs --------------------------------------------------------
 
 
-#' Additive shift MTP for continuous treatment
-#'
-#' @param delta Numeric shift.
-#' @param upper_fun Function of `H_df` returning the feasible upper bound.
-#' @param lower_fun Optional function of `H_df` returning a lower bound.
-#' @param name Optional name.
-#'
-#' @return An `MTP`.
-#' @export
-mtp_additive_shift <- function(delta,
-                               upper_fun = function(H_df) rep(Inf, nrow(H_df)),
-                               lower_fun = function(H_df) rep(-Inf, nrow(H_df)),
-                               name = NULL) {
-  pred_shift <- function(A, H_df) {
-    lo <- lower_fun(H_df)
-    hi <- upper_fun(H_df)
-    (A + delta >= lo) & (A + delta <= hi)
+# Additive shift MTP helper ----
+
+# Convert a numeric bound or history-dependent bound function into
+# a common function interface.
+#
+# A bound can be:
+#
+#   * a single numeric value, e.g. lower = 0; or
+#   * a function of H_df returning either one value or nrow(H_df) values.
+#
+.as_mtp_bound_function <- function(bound,
+                                   label) {
+  if (is.function(bound)) {
+    return(bound)
   }
 
-  pred_id <- function(A, H_df) {
+  if (
+    is.numeric(bound) &&
+    length(bound) == 1L &&
+    !is.na(bound)
+  ) {
+    force(bound)
+
+    return(
+      function(H_df) {
+        rep(
+          bound,
+          nrow(H_df)
+        )
+      }
+    )
+  }
+
+  stop(
+    "`", label, "` must be either a numeric scalar ",
+    "or a function of `H_df`."
+  )
+}
+
+
+#' Additive shift MTP for a continuous treatment
+#'
+#' @description
+#' Constructs a modified treatment policy that shifts treatment by `delta`
+#' whenever the shifted value remains within user-specified bounds. When the
+#' shifted treatment would fall outside the bounds, the observed treatment is
+#' left unchanged.
+#'
+#' Specifically,
+#'
+#' \deqn{
+#'   d(a,h)
+#'   =
+#'   \begin{cases}
+#'     a + \delta, & \ell(h) \leq a + \delta \leq u(h), \\
+#'     a, & \text{otherwise}.
+#'   \end{cases}
+#' }
+#'
+#' The bounds may be constant or history-dependent.
+#'
+#' @param delta Numeric scalar giving the additive treatment shift.
+#'
+#' @param lower Lower bound for the shifted treatment. Either a numeric scalar
+#'   or a function of `H_df` returning one value or `nrow(H_df)` values.
+#'   Defaults to `-Inf`.
+#'
+#' @param upper Upper bound for the shifted treatment. Either a numeric scalar
+#'   or a function of `H_df` returning one value or `nrow(H_df)` values.
+#'   Defaults to `Inf`.
+#'
+#' @param name Optional policy name.
+#'
+#' @return An `MTP` object.
+#'
+#' @export
+mtp_additive_shift <- function(delta,
+                               lower = -Inf,
+                               upper = Inf,
+                               name = NULL) {
+  if (
+    !is.numeric(delta) ||
+    length(delta) != 1L ||
+    is.na(delta) ||
+    !is.finite(delta)
+  ) {
+    stop(
+      "`delta` must be a single finite numeric value."
+    )
+  }
+
+  lower_fun <- .as_mtp_bound_function(
+    bound = lower,
+    label = "lower"
+  )
+
+  upper_fun <- .as_mtp_bound_function(
+    bound = upper,
+    label = "upper"
+  )
+
+
+  # Evaluate and validate treatment bounds ----
+
+  evaluate_bounds <- function(H_df) {
+    n <- nrow(H_df)
+
+    lo <- lower_fun(H_df)
+    hi <- upper_fun(H_df)
+
+    if (!is.numeric(lo)) {
+      stop(
+        "`lower` must evaluate to numeric values."
+      )
+    }
+
+    if (!is.numeric(hi)) {
+      stop(
+        "`upper` must evaluate to numeric values."
+      )
+    }
+
+    # A user-supplied function may conveniently return a scalar.
+    if (length(lo) == 1L) {
+      lo <- rep(
+        lo,
+        n
+      )
+    }
+
+    if (length(hi) == 1L) {
+      hi <- rep(
+        hi,
+        n
+      )
+    }
+
+    if (length(lo) != n) {
+      stop(
+        "`lower` must evaluate to either one value ",
+        "or `nrow(H_df)` values."
+      )
+    }
+
+    if (length(hi) != n) {
+      stop(
+        "`upper` must evaluate to either one value ",
+        "or `nrow(H_df)` values."
+      )
+    }
+
+    if (anyNA(lo) || anyNA(hi)) {
+      stop(
+        "`lower` and `upper` cannot evaluate to missing values."
+      )
+    }
+
+    if (any(lo > hi)) {
+      stop(
+        "`lower` cannot exceed `upper`."
+      )
+    }
+
+    list(
+      lower = lo,
+      upper = hi
+    )
+  }
+
+
+  # Define policy regions and maps ----
+
+  pred_shift <- function(A, H_df) {
+    bounds <- evaluate_bounds(H_df)
+
+    A_shifted <- A + delta
+
+    A_shifted >= bounds$lower &
+      A_shifted <= bounds$upper
+  }
+
+  pred_identity <- function(A, H_df) {
     !pred_shift(A, H_df)
   }
 
-  d_shift <- function(A, H_df) A + delta
-  d_id    <- function(A, H_df) A
+  d_shift <- function(A, H_df) {
+    A + delta
+  }
 
-  b_shift  <- function(A_star, H_df) A_star - delta
-  b_id     <- function(A_star, H_df) A_star
+  d_identity <- function(A, H_df) {
+    A
+  }
 
-  db_shift <- function(A_star, H_df) rep(1, length(A_star))
-  db_id    <- function(A_star, H_df) rep(1, length(A_star))
+  # Inverse of a* = a + delta.
+  b_shift <- function(A_star, H_df) {
+    A_star - delta
+  }
+
+  # Inverse of the identity branch.
+  b_identity <- function(A_star, H_df) {
+    A_star
+  }
+
+  # Both inverse maps have derivative one for an additive shift.
+  db_shift <- function(A_star, H_df) {
+    rep(1, length(A_star))
+  }
+
+  db_identity <- function(A_star, H_df) {
+    rep(1, length(A_star))
+  }
+
+
+  # Construct MTP object ----
 
   MTP$new(
     treatment_type = "continuous",
-    region_predicates = list(pred_shift, pred_id),
-    policy_pieces = list(d_shift, d_id),
-    inverse_map_pieces = list(b_shift, b_id),
-    inverse_deriv_pieces = list(db_shift, db_id),
-    name = name %||% paste0("additive_shift(", delta, ")")
+    region_predicates = list(pred_shift, pred_identity),
+    policy_pieces = list(d_shift, d_identity),
+    inverse_map_pieces = list(b_shift, b_identity),
+    inverse_deriv_pieces = list(db_shift, db_identity),
+    name = name %||%
+      paste0("additive_shift(", delta, ")")
   )
 }
 

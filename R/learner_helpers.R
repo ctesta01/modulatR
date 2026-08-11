@@ -229,69 +229,6 @@ make_nadir_density_g_learners <- function(tau,
 
 
 
-make_density_ratio_learner <- function(g_learner,
-                                       truncate_density = 1e-12) {
-  force(g_learner)
-
-  function(data) {
-    t <- data$metadata$t
-    policy_seq <- data$metadata$policy_seq
-
-    if (is.null(t)) stop("`data$metadata$t` is missing.")
-    if (is.null(policy_seq)) {
-      stop("`data$metadata$policy_seq` is missing.")
-    }
-
-    A_t <- data$A(t)
-    H_t <- data$H(t)
-    A_t_d <- policy_seq$apply_t(t, A_t, H_t)
-
-    g_fit <- g_learner(data)
-
-    if (is.null(g_fit$predict_density) ||
-        !is.function(g_fit$predict_density)) {
-      stop("`g_learner` must return a list with `predict_density`.")
-    }
-
-    g_fun <- g_fit$predict_density
-
-    g_obs <- .truncate_positive(
-      g_fun(A_t, H_t),
-      truncate = truncate_density
-    )
-
-    g_d_obs <- .truncate_positive(
-      policy_seq$gd_t(
-        t = t,
-        A_vec = A_t,
-        H_df = H_t,
-        density_fun = g_fun
-      ),
-      truncate = truncate_density
-    )
-
-    g_at_d <- .truncate_positive(
-      g_fun(A_t_d, H_t),
-      truncate = truncate_density
-    )
-
-    g_d_at_d <- .truncate_positive(
-      policy_seq$gd_t(
-        t = t,
-        A_vec = A_t_d,
-        H_df = H_t,
-        density_fun = g_fun
-      ),
-      truncate = truncate_density
-    )
-
-    list(
-      fit = g_fit,
-      r_obs = as.numeric(g_d_obs / g_obs),
-      r_d = as.numeric(g_d_at_d / g_at_d)
-    )
-  }
-}
 
 private_formula_for_time <- function(formula,
                                      t,

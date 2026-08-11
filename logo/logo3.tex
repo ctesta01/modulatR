@@ -1,0 +1,105 @@
+% modulatR hex sticker ------------------------------------------------------
+%
+% A standard pointy-top R hex sticker (2" x 1.73" aspect) showing an observed
+% treatment density g (dashed, cream) and the post-policy density g^d (solid,
+% filled green) induced by the MTP  d(a) = a - s for a >= threshold, else a.
+% The post-policy density is taller on the left and has the characteristic
+% discontinuity ("cliff") at the threshold -- the visual signature of a
+% piecewise MTP under the change-of-variables formula.
+%
+% Compile:  pdflatex modulatR-hex.tex
+% Convert:  pdftoppm -png -r 600 modulatR-hex.pdf logo   (for man/figures/)
+% ---------------------------------------------------------------------------
+\documentclass[tikz,border=0mm]{standalone}
+
+\usepackage{lmodern}          % bold monospace for the wordmark
+\usepackage[T1]{fontenc}
+\usetikzlibrary{arrows.meta}
+
+% --------------------------------------------------------------------------
+% Palette (Madagascar-forest greens + cream + gold accent)
+% --------------------------------------------------------------------------
+\definecolor{hexfill}{RGB}{21,56,37}      % deep forest green background
+\definecolor{hexborder}{RGB}{166,214,163} % light sage border
+\definecolor{cream}{RGB}{240,234,214}     % observed density / text
+\definecolor{shiftfill}{RGB}{104,190,132} % post-policy density fill
+\definecolor{shiftline}{RGB}{196,236,198} % post-policy density outline
+\definecolor{gold}{RGB}{244,197,93}       % delta arrow accent
+
+% --------------------------------------------------------------------------
+% Tunable design parameters
+% --------------------------------------------------------------------------
+\newcommand{\HexR}{2.7}        % hexagon circumradius (cm); height = 2*HexR
+\newcommand{\Thresh}{3.0}      % threshold (in "treatment value" units)
+\newcommand{\XMax}{5.8}        % right end of the plotted domain
+
+% Pointy-top hexagon path at circumradius #1
+\newcommand{\hexpath}[1]{%
+  (90:#1) -- (150:#1) -- (210:#1) -- (270:#1) -- (330:#1) -- (30:#1) -- cycle}
+
+\begin{document}
+\begin{tikzpicture}[
+  >={Stealth[length=5pt,width=5pt]},
+  % ------------------------------------------------------------------------
+  % Density functions and coordinate mapping
+  %   gobs : observed density (gamma-shaped, peak height 1 at x ~ 1.33)
+  %   gd   : post-policy density below the threshold (mass piled up, taller)
+  %   gtl  : post-policy density above the threshold (mass removed, lower)
+  %   X,Y  : map "treatment value" and "density" units into hex coordinates
+  % ------------------------------------------------------------------------
+  declare function={
+    gobs(\x) = 4.16*\x*\x*exp(-1.5*\x);
+    gd(\x)   = 1.50*gobs(\x);
+    gtl(\x)  = 0.35*gobs(\x);
+    X(\x)    = -1.90 + 0.6333*\x;
+    Y(\y)    = -0.55 + 1.35*\y;
+  }
+]
+
+% -- Hexagon ----------------------------------------------------------------
+\draw[hexborder, line width=3pt, fill=hexfill] \hexpath{\HexR};
+
+% -- Density artwork, clipped to a slightly inset hexagon --------------------
+\begin{scope}
+  \clip \hexpath{0.94*\HexR};
+
+  % Baseline "axis"
+  \draw[cream, opacity=0.45, line width=0.7pt]
+    ({X(-0.4)},{Y(0)}) -- ({X(6.6)},{Y(0)});
+
+  % Observed density g: dashed cream outline with a faint fill
+  \fill[cream, opacity=0.10]
+    ({X(0.02)},{Y(0)})
+    -- plot[domain=0.02:\XMax, samples=80, smooth] ({X(\x)},{Y(gobs(\x))})
+    -- ({X(\XMax)},{Y(0)}) -- cycle;
+
+  % Post-policy density g^d: solid fill, with the cliff at the threshold
+  \fill[shiftfill, opacity=0.88]
+    ({X(0.02)},{Y(0)})
+    -- plot[domain=0.02:\Thresh, samples=70, smooth] ({X(\x)},{Y(gd(\x))})
+    -- ({X(\Thresh)},{Y(gtl(\Thresh))})
+    -- plot[domain=\Thresh:\XMax, samples=50, smooth] ({X(\x)},{Y(gtl(\x))})
+    -- ({X(\XMax)},{Y(0)}) -- cycle;
+  \draw[shiftline, line width=1.5pt, line join=round]
+    plot[domain=0.02:\Thresh, samples=70, smooth] ({X(\x)},{Y(gd(\x))})
+    -- ({X(\Thresh)},{Y(gtl(\Thresh))})
+    -- plot[domain=\Thresh:\XMax, samples=50, smooth] ({X(\x)},{Y(gtl(\x))});
+
+  \draw[cream, line width=1.1pt, dash pattern=on 3.2pt off 2.4pt,
+        line cap=round]
+    plot[domain=0.02:\XMax, samples=80, smooth] ({X(\x)},{Y(gobs(\x))});
+
+  % Delta arrow: mass moved leftward under the policy
+  \draw[gold, line width=1.4pt, ->, line cap=round]
+    ({X(3.55)},{Y(1.02)}) -- ({X(1.75)},{Y(1.02)});
+  \node[gold, font=\bfseries\large] at ({X(2.75)},{Y(1.24)}) {$\delta$};
+\end{scope}
+
+% -- Wordmark ----------------------------------------------------------------
+\node at (0,-1.12) {%
+  \fontsize{21}{21}\selectfont\ttfamily\bfseries
+  \textcolor{cream}{\{modulat}\textcolor{shiftfill}{R}\textcolor{cream}{\}}%
+};
+
+\end{tikzpicture}
+\end{document}

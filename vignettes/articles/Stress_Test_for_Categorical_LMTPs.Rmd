@@ -1,0 +1,852 @@
+---
+title: "Stress-testing a multi-valued categorical LMTP"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Stress-testing a multi-valued categorical LMTP}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+library(modulatR)
+```
+
+```{r}
+dose_levels <- c(
+  "none",
+  "low",
+  "medium",
+  "high",
+  "very_high"
+)
+
+dose_score <- c(
+  none = 0,
+  low = 1,
+  medium = 2,
+  high = 3,
+  very_high = 4
+)
+```
+
+```{r}
+# Treatment mechanism helpers ----
+
+clip <- function(x, lower, upper) {
+  pmin(
+    pmax(x, lower),
+    upper
+  )
+}
+
+
+treatment_probabilities <- function(df, t) {
+  severity_col <- paste0("severity", t)
+  toxicity_col <- paste0("toxicity", t)
+
+  severity <- df[[severity_col]]
+  toxicity <- df[[toxicity_col]]
+
+  previous_dose <- if (t == 1L) {
+    rep(0, nrow(df))
+  } else {
+    unname(
+      dose_score[
+        df[[paste0("A", t - 1L)]]
+      ]
+    )
+  }
+
+  # The preferred treatment intensity rises with disease severity and tends to
+  # remain near the previous treatment level, but falls as toxicity increases.
+  preferred_dose <-
+    1.10 +
+    0.75 * severity -
+    0.65 * toxicity +
+    0.25 * df$baseline_risk +
+    0.30 * df$frailty +
+    0.35 * previous_dose
+
+  preferred_dose <- clip(
+    preferred_dose,
+    lower = 0.10,
+    upper = 3.90
+  )
+
+  score_values <- unname(
+    dose_score[
+      dose_levels
+    ]
+  )
+
+  # Mild category-specific preferences keep the treatment distribution from
+  # being perfectly symmetric.
+  category_bias <- c(
+    0.10,
+    0.05,
+    0.00,
+    -0.05,
+    -0.10
+  )
+
+  eta <- vapply(
+    score_values,
+    function(k) {
+      -0.70 * (k - preferred_dose)^2
+    },
+    numeric(nrow(df))
+  )
+
+  eta <- sweep(
+    eta,
+    MARGIN = 2,
+    STATS = category_bias,
+    FUN = "+"
+  )
+
+  # Numerically stable row-wise softmax.
+  eta <- eta - apply(
+    eta,
+    MARGIN = 1,
+    FUN = max
+  )
+
+  exp_eta <- exp(eta)
+
+  probs <- exp_eta / rowSums(exp_eta)
+
+  colnames(probs) <- dose_levels
+
+  probs
+}
+
+
+draw_treatment <- function(df,
+                           t,
+                           u = stats::runif(nrow(df))) {
+  probs <- treatment_probabilities(
+    df = df,
+    t = t
+  )
+
+  cumulative_probs <- t(
+    apply(
+      probs,
+      MARGIN = 1,
+      FUN = cumsum
+    )
+  )
+
+  category_index <- 1L +
+    rowSums(
+      u > cumulative_probs
+    )
+
+  dose_levels[
+    category_index
+  ]
+}
+```
+
+```{r}
+# Policy helper ----
+
+modify_dose <- function(A,
+                        severity,
+                        toxicity) {
+  score <- unname(
+    dose_score[A]
+  )
+
+  # High toxicity takes priority over escalation.
+  deescalate <-
+    toxicity > 1.00 &
+    score > 0
+
+  escalate <-
+    !deescalate &
+    severity > 0.50 &
+    toxicity < 0.75 &
+    score < 4
+
+  modified_score <-
+    score -
+    as.integer(deescalate) +
+    as.integer(escalate)
+
+  dose_levels[
+    modified_score + 1L
+  ]
+}
+```
+
+```{r}
+# Construct time-specific categorical MTPs ----
+
+mtp_t1 <- mtp_discrete(
+  map_fun = function(A, H_df) {
+    modify_dose(
+      A = A,
+      severity = H_df$severity1,
+      toxicity = H_df$toxicity1
+    )
+  },
+  support = dose_levels,
+  name = "adaptive_dose_t1"
+)
+
+
+mtp_t2 <- mtp_discrete(
+  map_fun = function(A, H_df) {
+    modify_dose(
+      A = A,
+      severity = H_df$severity2,
+      toxicity = H_df$toxicity2
+    )
+  },
+  support = dose_levels,
+  name = "adaptive_dose_t2"
+)
+
+
+mtp_t3 <- mtp_discrete(
+  map_fun = function(A, H_df) {
+    modify_dose(
+      A = A,
+      severity = H_df$severity3,
+      toxicity = H_df$toxicity3
+    )
+  },
+  support = dose_levels,
+  name = "adaptive_dose_t3"
+)
+
+
+policy_adaptive <- LMTPPolicySequence$new(
+  policies = list(
+    mtp_t1,
+    mtp_t2,
+    mtp_t3
+  ),
+  name = "adaptive_escalation_deescalation"
+)
+```
+
+```{r}
+# Generate exogenous variables ----
+
+generate_exogenous_data <- function(n) {
+  data.frame(
+    baseline_risk = stats::rnorm(n),
+    frailty = stats::rbinom(
+      n,
+      size = 1,
+      prob = 0.35
+    ),
+
+    e_severity1 = stats::rnorm(n),
+    e_toxicity1 = stats::rnorm(n),
+
+    e_severity2 = stats::rnorm(n),
+    e_toxicity2 = stats::rnorm(n),
+
+    e_severity3 = stats::rnorm(n),
+    e_toxicity3 = stats::rnorm(n),
+
+    u_A1 = stats::runif(n),
+    u_A2 = stats::runif(n),
+    u_A3 = stats::runif(n),
+
+    e_Y = stats::rnorm(n)
+  )
+}
+```
+
+```{r}
+# Simulate one longitudinal trajectory regime ----
+
+simulate_trajectory <- function(exogenous,
+                                apply_policy = FALSE) {
+  n <- nrow(exogenous)
+
+  baseline_risk <- exogenous$baseline_risk
+  frailty <- exogenous$frailty
+
+  # Time 1 covariates
+  severity1 <-
+    0.70 * baseline_risk +
+    0.45 * frailty +
+    exogenous$e_severity1
+
+  toxicity1 <-
+    0.20 * frailty +
+    0.50 * exogenous$e_toxicity1
+
+  H1 <- data.frame(
+    baseline_risk = baseline_risk,
+    frailty = frailty,
+    severity1 = severity1,
+    toxicity1 = toxicity1
+  )
+
+  # Natural treatment draw under the current history.
+  A1_natural <- draw_treatment(
+    df = H1,
+    t = 1,
+    u = exogenous$u_A1
+  )
+
+  A1 <- if (apply_policy) {
+    modify_dose(
+      A = A1_natural,
+      severity = severity1,
+      toxicity = toxicity1
+    )
+  } else {
+    A1_natural
+  }
+
+  dose1 <- unname(
+    dose_score[A1]
+  )
+
+  # Time 2 covariates depend on the treatment actually delivered at time 1.
+  severity2 <-
+    0.55 * severity1 +
+    0.30 * baseline_risk +
+    0.20 * frailty -
+    0.30 * dose1 +
+    0.12 * severity1 * frailty +
+    exogenous$e_severity2
+
+  toxicity2 <-
+    0.45 * toxicity1 +
+    0.20 * frailty +
+    0.28 * dose1 +
+    0.06 * dose1^2 +
+    0.60 * exogenous$e_toxicity2
+
+  H2 <- data.frame(
+    baseline_risk = baseline_risk,
+    frailty = frailty,
+    severity1 = severity1,
+    toxicity1 = toxicity1,
+    A1 = A1,
+    severity2 = severity2,
+    toxicity2 = toxicity2
+  )
+
+  A2_natural <- draw_treatment(
+    df = H2,
+    t = 2,
+    u = exogenous$u_A2
+  )
+
+  A2 <- if (apply_policy) {
+    modify_dose(
+      A = A2_natural,
+      severity = severity2,
+      toxicity = toxicity2
+    )
+  } else {
+    A2_natural
+  }
+
+  dose2 <- unname(
+    dose_score[A2]
+  )
+
+  # Time 3 covariates depend on the modified/observed treatment at time 2.
+  severity3 <-
+    0.50 * severity2 +
+    0.20 * baseline_risk +
+    0.15 * frailty -
+    0.32 * dose2 +
+    0.08 * severity2^2 +
+    exogenous$e_severity3
+
+  toxicity3 <-
+    0.50 * toxicity2 +
+    0.15 * frailty +
+    0.30 * dose2 +
+    0.05 * dose2^2 +
+    0.60 * exogenous$e_toxicity3
+
+  H3 <- data.frame(
+    baseline_risk = baseline_risk,
+    frailty = frailty,
+    severity1 = severity1,
+    toxicity1 = toxicity1,
+    A1 = A1,
+    severity2 = severity2,
+    toxicity2 = toxicity2,
+    A2 = A2,
+    severity3 = severity3,
+    toxicity3 = toxicity3
+  )
+
+  A3_natural <- draw_treatment(
+    df = H3,
+    t = 3,
+    u = exogenous$u_A3
+  )
+
+  A3 <- if (apply_policy) {
+    modify_dose(
+      A = A3_natural,
+      severity = severity3,
+      toxicity = toxicity3
+    )
+  } else {
+    A3_natural
+  }
+
+  dose3 <- unname(
+    dose_score[A3]
+  )
+
+  # Higher values are better.
+  #
+  # Treatment has both indirect benefit through severity reduction and direct
+  # toxicity/cost tradeoffs.
+  Y <-
+    10 +
+    0.30 * baseline_risk -
+    0.20 * frailty -
+    0.35 * severity2 -
+    1.00 * severity3 -
+    0.25 * toxicity2 -
+    0.75 * toxicity3 +
+    0.20 * dose3 -
+    0.04 * dose3^2 +
+    exogenous$e_Y
+
+  data.frame(
+    baseline_risk = baseline_risk,
+    frailty = frailty,
+
+    severity1 = severity1,
+    toxicity1 = toxicity1,
+    A1 = A1,
+
+    severity2 = severity2,
+    toxicity2 = toxicity2,
+    A2 = A2,
+
+    severity3 = severity3,
+    toxicity3 = toxicity3,
+    A3 = A3,
+
+    Y = Y,
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+```{r}
+# Monte Carlo truth ----
+
+set.seed(1001)
+
+n_truth <- 250000
+
+exo_truth <- generate_exogenous_data(
+  n = n_truth
+)
+
+truth_natural_data <- simulate_trajectory(
+  exogenous = exo_truth,
+  apply_policy = FALSE
+)
+
+truth_policy_data <- simulate_trajectory(
+  exogenous = exo_truth,
+  apply_policy = TRUE
+)
+
+truth <- c(
+  EY = mean(
+    truth_natural_data$Y
+  ),
+  EYd = mean(
+    truth_policy_data$Y
+  ),
+  difference = mean(
+    truth_policy_data$Y -
+      truth_natural_data$Y
+  )
+)
+
+truth_mc_se <- c(
+  EY = stats::sd(
+    truth_natural_data$Y
+  ) / sqrt(n_truth),
+
+  EYd = stats::sd(
+    truth_policy_data$Y
+  ) / sqrt(n_truth),
+
+  difference = stats::sd(
+    truth_policy_data$Y -
+      truth_natural_data$Y
+  ) / sqrt(n_truth)
+)
+
+rbind(
+  truth = truth,
+  Monte_Carlo_SE = truth_mc_se
+)
+```
+
+```{r}
+# Observed estimation sample ----
+
+set.seed(2002)
+
+n <- 15000
+
+observed_data <- simulate_trajectory(
+  exogenous = generate_exogenous_data(n),
+  apply_policy = FALSE
+)
+
+ds <- LMTPData$new(
+  data = observed_data,
+
+  W_cols = c(
+    "baseline_risk",
+    "frailty"
+  ),
+
+  L_cols = list(
+    c(
+      "severity1",
+      "toxicity1"
+    ),
+    c(
+      "severity2",
+      "toxicity2"
+    ),
+    c(
+      "severity3",
+      "toxicity3"
+    )
+  ),
+
+  A_cols = c(
+    "A1",
+    "A2",
+    "A3"
+  ),
+
+  Y_col = "Y"
+)
+
+ds
+```
+
+```{r}
+# Inspect policy modifications ----
+
+A1_d <- policy_adaptive$apply_t(
+  t = 1,
+  A_vec = ds$A(1),
+  H_df = ds$H(1)
+)
+
+A2_d <- policy_adaptive$apply_t(
+  t = 2,
+  A_vec = ds$A(2),
+  H_df = ds$H(2)
+)
+
+A3_d <- policy_adaptive$apply_t(
+  t = 3,
+  A_vec = ds$A(3),
+  H_df = ds$H(3)
+)
+
+
+table(
+  observed = ds$A(1),
+  modified = A1_d
+)
+
+table(
+  observed = ds$A(2),
+  modified = A2_d
+)
+
+table(
+  observed = ds$A(3),
+  modified = A3_d
+)
+```
+
+```{r}
+data.frame(
+  time = 1:3,
+
+  proportion_changed = c(
+    mean(ds$A(1) != A1_d),
+    mean(ds$A(2) != A2_d),
+    mean(ds$A(3) != A3_d)
+  )
+)
+```
+
+```{r}
+# Oracle categorical g learners ----
+
+make_oracle_g_learner <- function(t) {
+  force(t)
+
+  function(data) {
+    function(newdata) {
+      probs <- treatment_probabilities(
+        df = newdata$df,
+        t = t
+      )
+
+      A_col <- paste0(
+        "A",
+        t
+      )
+
+      treatment_index <- match(
+        newdata$df[[A_col]],
+        dose_levels
+      )
+
+      if (anyNA(treatment_index)) {
+        stop(
+          "Encountered a treatment value outside `dose_levels`."
+        )
+      }
+
+      probs[
+        cbind(
+          seq_len(newdata$n),
+          treatment_index
+        )
+      ]
+    }
+  }
+}
+
+
+g_learners <- lapply(
+  1:3,
+  make_oracle_g_learner
+)
+```
+
+```{r}
+# Sequential outcome-regression learners ----
+
+m_formula_t1 <-
+  `..pseudo_outcome` ~
+  baseline_risk +
+  I(baseline_risk^2) +
+  frailty +
+  severity1 +
+  I(severity1^2) +
+  toxicity1 +
+  I(toxicity1^2) +
+  A1 +
+  severity1:toxicity1
+
+
+m_formula_t2 <-
+  `..pseudo_outcome` ~
+  baseline_risk +
+  I(baseline_risk^2) +
+  frailty +
+  severity1 +
+  toxicity1 +
+  A1 +
+  severity2 +
+  I(severity2^2) +
+  toxicity2 +
+  I(toxicity2^2) +
+  A2 +
+  severity2:toxicity2
+
+
+m_formula_t3 <-
+  `..pseudo_outcome` ~
+  baseline_risk +
+  I(baseline_risk^2) +
+  frailty +
+  severity1 +
+  toxicity1 +
+  A1 +
+  severity2 +
+  toxicity2 +
+  A2 +
+  severity3 +
+  I(severity3^2) +
+  toxicity3 +
+  I(toxicity3^2) +
+  A3 +
+  severity3:toxicity3
+
+
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian(),
+  formula = list(
+    m_formula_t1,
+    m_formula_t2,
+    m_formula_t3
+  )
+)
+```
+
+```{r}
+# Fit adaptive categorical LMTP TMLE ----
+
+nuisance_factory <- LMTPNuisanceFactory$new(
+  policy_seq = policy_adaptive,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_density = 1e-12,
+  truncate_ratio = c(
+    1e-6,
+    1e6
+  )
+)
+
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian()
+)
+
+
+fit <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nuisance_factory,
+  fluctuation = fluctuation
+)
+
+fit
+```
+
+```{r}
+# Compare estimate with Monte Carlo truth ----
+
+comparison <- data.frame(
+  estimand = "E[Y^d]",
+  truth = unname(
+    truth["EYd"]
+  ),
+  truth_mc_se = unname(
+    truth_mc_se["EYd"]
+  ),
+  estimate = unname(
+    fit$estimate
+  ),
+  se = unname(
+    fit$se
+  ),
+  lower = unname(
+    fit$ci["lower"]
+  ),
+  upper = unname(
+    fit$ci["upper"]
+  )
+)
+
+comparison$error <-
+  comparison$estimate -
+  comparison$truth
+
+comparison$z_from_truth <-
+  comparison$error /
+  sqrt(
+    comparison$se^2 +
+      comparison$truth_mc_se^2
+  )
+
+comparison
+```
+
+```{r}
+# End-to-end sanity check ----
+
+combined_se <- sqrt(
+  fit$se^2 +
+    truth_mc_se["EYd"]^2
+)
+
+stopifnot(
+  abs(
+    fit$estimate -
+      truth["EYd"]
+  ) <
+    4 * combined_se
+)
+```
+
+
+```{r}
+# Density-ratio diagnostics ----
+
+ratio_diagnostics <- data.frame(
+  time = 1:ds$tau(),
+
+  mean_r = vapply(
+    nuisance_factory$r_obs_preds,
+    mean,
+    numeric(1)
+  ),
+
+  min_r = vapply(
+    nuisance_factory$r_obs_preds,
+    min,
+    numeric(1)
+  ),
+
+  max_r = vapply(
+    nuisance_factory$r_obs_preds,
+    max,
+    numeric(1)
+  ),
+
+  mean_omega = vapply(
+    nuisance_factory$omega_preds,
+    mean,
+    numeric(1)
+  ),
+
+  min_omega = vapply(
+    nuisance_factory$omega_preds,
+    min,
+    numeric(1)
+  ),
+
+  max_omega = vapply(
+    nuisance_factory$omega_preds,
+    max,
+    numeric(1)
+  )
+)
+
+ratio_diagnostics
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

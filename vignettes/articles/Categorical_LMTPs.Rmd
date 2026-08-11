@@ -1,0 +1,320 @@
+---
+title: "Categorical LMTP check"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Categorical LMTP check}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, message=FALSE}
+library(modulatR)
+```
+
+```{r}
+dose_levels <- c(
+  "none",
+  "low",
+  "medium",
+  "high"
+)
+
+dose_score <- c(
+  none = 0,
+  low = 1,
+  medium = 2,
+  high = 3
+)
+```
+
+The policy is:
+
+If a patient is eligible for treatment escalation, increase treatment by one
+category. Otherwise leave treatment unchanged. Patients already receiving
+high treatment remain at high treatment.
+
+Thus, among eligible patients,
+$none \to low \to medium \to high$. 
+
+## DGP 
+
+```{r}
+draw_treatment <- function(n) {
+  sample(
+    dose_levels,
+    size = n,
+    replace = TRUE,
+    prob = rep(0.25, 4)
+  )
+}
+
+
+escalate_one_level <- function(A,
+                               eligible) {
+  next_level <- c(
+    none = "low",
+    low = "medium",
+    medium = "high",
+    high = "high"
+  )
+
+  out <- A
+
+  out[eligible == 1] <- unname(
+    next_level[
+      A[eligible == 1]
+    ]
+  )
+
+  out
+}
+
+
+generate_observed_data <- function(n) {
+  W <- rnorm(n)
+
+  eligible <- as.integer(
+    W > -0.25
+  )
+
+  L1 <- 0.5 * W +
+    0.4 * eligible +
+    rnorm(n)
+
+  A1 <- draw_treatment(n)
+
+  L2 <- 0.4 * W +
+    0.5 * L1 +
+    0.6 * dose_score[A1] +
+    rnorm(n)
+
+  A2 <- draw_treatment(n)
+
+  Y <- 1 +
+    0.5 * W +
+    0.4 * L1 +
+    0.7 * L2 -
+    0.6 * dose_score[A1] -
+    1.0 * dose_score[A2] +
+    rnorm(n)
+
+  data.frame(
+    W = W,
+    eligible = eligible,
+    L1 = L1,
+    A1 = A1,
+    L2 = L2,
+    A2 = A2,
+    Y = Y,
+    stringsAsFactors = FALSE
+  )
+}
+```
+
+## Categorical LMTP Definition 
+
+```{r}
+mtp_escalate <- mtp_discrete(
+  map_fun = function(A, H_df) {
+    escalate_one_level(
+      A = A,
+      eligible = H_df$eligible
+    )
+  },
+  support = dose_levels,
+  name = "escalate_if_eligible"
+)
+
+policy_escalate <- repeat_policy_over_time(
+  mtp = mtp_escalate,
+  tau = 2,
+  name = "escalate_if_eligible_sequence"
+)
+```
+
+Verify the policy works.
+
+```{r}
+policy_example <- data.frame(
+  eligible = rep(c(0, 1), each = 4),
+  A = rep(dose_levels, times = 2),
+  stringsAsFactors = FALSE
+)
+
+policy_example$A_star <- mtp_escalate$apply_policy(
+  A_vec = policy_example$A,
+  H_df = policy_example["eligible"]
+)
+
+policy_example
+```
+
+
+## Monte Carlo Truth
+
+```{r}
+generate_policy_outcome <- function(n) {
+  W <- rnorm(n)
+
+  eligible <- as.integer(
+    W > -0.25
+  )
+
+  L1 <- 0.5 * W +
+    0.4 * eligible +
+    rnorm(n)
+
+  # Natural treatment at time 1
+  A1 <- draw_treatment(n)
+
+  # Modified treatment at time 1
+  A1_d <- escalate_one_level(
+    A = A1,
+    eligible = eligible
+  )
+
+  # L2 evolves under the modified treatment history
+  L2_d <- 0.4 * W +
+    0.5 * L1 +
+    0.6 * dose_score[A1_d] +
+    rnorm(n)
+
+  # Natural treatment at time 2 under the modified history
+  A2 <- draw_treatment(n)
+
+  # Modified treatment at time 2
+  A2_d <- escalate_one_level(
+    A = A2,
+    eligible = eligible
+  )
+
+  # Conditional mean of the policy outcome.
+  #
+  # We omit an additional mean-zero outcome error because it does not affect
+  # E[Y^d] and only adds Monte Carlo noise.
+  Y_d_mean <- 1 +
+    0.5 * W +
+    0.4 * L1 +
+    0.7 * L2_d -
+    0.6 * dose_score[A1_d] -
+    1.0 * dose_score[A2_d]
+
+  Y_d_mean
+}
+
+
+set.seed(1001)
+
+n_truth <- 500000
+
+truth <- mean(
+  generate_policy_outcome(
+    n = n_truth
+  )
+)
+
+truth
+```
+
+## Fit the categorical LMTP
+
+```{r}
+set.seed(2002)
+
+n <- 10000
+
+dat <- generate_observed_data(
+  n = n
+)
+
+ds <- LMTPData$new(
+  data = dat,
+  W_cols = c(
+    "W",
+    "eligible"
+  ),
+  L_cols = list(
+    "L1",
+    "L2"
+  ),
+  A_cols = c(
+    "A1",
+    "A2"
+  ),
+  Y_col = "Y"
+)
+
+ds
+```
+
+For the sake of this vignette, which is just a sanity check, we use the 
+'oracle' (known) treatment probability mass function in fitting the models. 
+
+```{r}
+oracle_g_learner <- function(data) {
+  function(newdata) {
+    rep(
+      0.25,
+      newdata$n
+    )
+  }
+}
+
+g_learners <- repeat_lmtp_learner(
+  learner_fun = oracle_g_learner,
+  tau = ds$tau()
+)
+```
+
+```{r}
+m_learners <- make_glm_m_learners(
+  tau = ds$tau(),
+  family = stats::gaussian()
+)
+
+nuisance_factory <- LMTPNuisanceFactory$new(
+  policy_seq = policy_escalate,
+  m_learners = m_learners,
+  g_learners = g_learners,
+  truncate_ratio = c(
+    1e-6,
+    1e6
+  )
+)
+
+fluctuation <- LMTPFluctuationSubmodel$new(
+  family = stats::gaussian()
+)
+```
+
+```{r}
+fit <- run_tmle_for_LMTP(
+  ds = ds,
+  nuisance_factory = nuisance_factory,
+  fluctuation = fluctuation
+)
+
+fit
+```
+
+## Comparison with the truth
+
+```{r}
+comparison <- data.frame(
+  truth = truth,
+  estimate = unname(fit$estimate),
+  se = unname(fit$se),
+  lower = unname(fit$ci["lower"]),
+  upper = unname(fit$ci["upper"])
+)
+
+comparison$error <- with(
+  comparison,
+  estimate - truth
+)
+
+comparison
+```
+
+
+

@@ -113,6 +113,15 @@ LMTPFluctuationSubmodel <- R6::R6Class(
         stop("`H_obs` and `H_d` must have the same column names.")
       }
 
+      # Preserve user-facing clever-covariate names, but use simple
+      # syntactically safe names internally when fitting the GLM.
+      H_output_names <- colnames(H_obs_df)
+      H_fit_names <- paste0("H", seq_along(H_output_names))
+
+      colnames(H_obs_df) <- H_fit_names
+      colnames(H_d_df) <- H_fit_names
+
+
       is_logistic <- private$is_logistic()
 
       if (is_logistic) {
@@ -130,7 +139,7 @@ LMTPFluctuationSubmodel <- R6::R6Class(
         check.names = FALSE
       )
 
-      H_names <- colnames(H_obs_df)
+      H_names <- H_fit_names
 
       rhs <- if (isTRUE(self$use_intercept)) {
         paste(H_names, collapse = " + ")
@@ -163,8 +172,9 @@ LMTPFluctuationSubmodel <- R6::R6Class(
 
       eps <- eps[H_names]
       eps[is.na(eps)] <- 0
+
       eps <- as.numeric(eps)
-      names(eps) <- H_names
+      names(eps) <- H_output_names
 
       shift_obs <- as.numeric(as.matrix(H_obs_df) %*% eps) + intercept
       shift_d <- as.numeric(as.matrix(H_d_df) %*% eps) + intercept

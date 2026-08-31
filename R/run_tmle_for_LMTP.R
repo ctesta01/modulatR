@@ -118,7 +118,9 @@ run_tmle_for_LMTP <- function(ds,
       H_obs = H_obs_t,
       m_d = m_init_d[[t]],
       H_d = H_d_t,
-      t = t
+      t = t,
+      weights = nuisance_factory$omega(t),
+      design = NULL
     )
 
     m_star_obs[[t]] <- update_t$m_obs_star
@@ -561,7 +563,9 @@ run_subgroup_tmle_for_LMTP <- function(
       H_obs = H_obs_t,
       m_d = m_init_d[[t]],
       H_d = H_d_t,
-      t = t
+      t = t,
+      weights = nuisance_factory$omega(t),
+      design = as.matrix(subgroup_mat)
     )
 
     m_star_obs[[t]] <- update_t$m_obs_star
